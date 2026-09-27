@@ -168,9 +168,6 @@ class KKCRX_OrderSuspend
 		groupInfo.SetReturnToPositionOriginType(CRX_EAIReturnToPositionOriginType.NEVER);
 		groupInfo.SetInvestigate(false);
 		groupInfo.SetInvestigateBuildingSearch(false);
-		groupInfo.SetCombatInCoverDynamicCoverSearchChance(0);
-		groupInfo.SetCombatMoveChance(0);
-		groupInfo.SetCombatCoverChance(0);
 		groupInfo.SetGlobalSettingsOverrideExclude(true);
 
 		SCR_AIConfigComponent config = GetConfig(group);
@@ -182,9 +179,6 @@ class KKCRX_OrderSuspend
 		config.m_eReturnToPositionOriginType = CRX_EAIReturnToPositionOriginType.NEVER;
 		config.m_bInvestigate = false;
 		config.m_bInvestigateBuildingSearch = false;
-		config.m_iCombatInCoverDynamicCoverSearchChance = 0;
-		config.m_iCombatMoveChance = 0;
-		config.m_iCombatCoverChance = 0;
 		config.m_bGlobalSettingsOverrideExclude = true;
 		config.m_bConfigFilesSettingsOverrideExclude = true;
 	}
@@ -390,4 +384,156 @@ modded class KK_GarrisonBuildingActivity
 		m_bKKCRX_Suspended = false;
 		KKCRX_OrderSuspend.Resume(m_Group);
 	}
+}
+
+modded class KK_PerceptionBoost
+{
+	static void KKCRX_SetActive(IEntity soldier, bool active)
+	{
+		if (!soldier)
+			return;
+
+		if (active)
+			s_ActiveSoldiers.Insert(soldier);
+		else
+			s_ActiveSoldiers.RemoveItem(soldier);
+	}
+}
+
+modded class SCR_AICombatComponent
+{
+	override void UpdatePerceptionFactor(
+		PerceptionComponent perceptionComp,
+		SCR_AIThreatSystem threatSystem
+	)
+	{
+		IEntity owner = GetOwner();
+		bool sharpOrder =
+			owner &&
+			perceptionComp &&
+			threatSystem &&
+			KK_PerceptionBoost.IsActiveSoldier(owner) &&
+			KK_PerceptionBoost.UseSharpCombat();
+
+		// Koopky replaces CRX recognition with the base-game rates while an
+		// order is active. Drop that mark for this call so CRX's own rates run.
+		// Koopky already stored its recognition-speed slider on this component,
+		// and CRX multiplies by that slider.
+		if (sharpOrder)
+			KK_PerceptionBoost.KKCRX_SetActive(owner, false);
+
+		super.UpdatePerceptionFactor(perceptionComp, threatSystem);
+
+		if (sharpOrder)
+			KK_PerceptionBoost.KKCRX_SetActive(owner, true);
+	}
+}
+
+modded class SCR_AIAttackBehavior
+{
+	override float CustomEvaluate()
+	{
+		float score = super.CustomEvaluate();
+
+		IEntity body;
+		if (m_Utility)
+			body = m_Utility.m_OwnerEntity;
+
+		if (!KK_GarrisonHold.IsPinned(body) && m_Utility)
+			body = m_Utility.GetOwner();
+
+		if (!KK_GarrisonHold.IsPinned(body))
+			return score;
+
+		// CRX calls the base attack evaluate directly, so Koopky's
+		// "stay on the post" flag never runs when CRX loads later.
+		m_bUseCombatMove = false;
+		KK_GarrisonHold.SetPinned(body, true);
+		return score;
+	}
+
+	override void InitWaitTime(SCR_AIUtilityComponent utility)
+	{
+		super.InitWaitTime(utility);
+
+		if (
+			!utility ||
+			!KK_PerceptionBoost.IsActiveSoldier(utility.m_OwnerEntity) ||
+			!KK_PerceptionBoost.UseSharpCombat()
+		)
+		{
+			return;
+		}
+
+		// CRX calls the base wait directly, so Koopky's zero never lands.
+		m_fWaitTime.m_Value = 0;
+	}
+}
+
+modded class SCR_AIMoveIndividuallyBehavior
+{
+	override float CustomEvaluate()
+	{
+		IEntity body;
+		if (m_Utility)
+			body = m_Utility.m_OwnerEntity;
+
+		if (!KK_GarrisonHold.IsPinned(body))
+			return super.CustomEvaluate();
+
+		// CRX raises this move to attack priority and sprints when threatened.
+		if (m_CharacterMovementComponent)
+			m_CharacterMovementComponent.SetMovementTypeWanted(EMovementType.IDLE);
+
+		return 0;
+	}
+}
+
+modded class SCR_AICombatMoveLogicBase
+{
+	protected override bool SuppressedInCoverCondition()
+	{
+		if (KKCRX_IsHoldingPost(m_Entity) || KKCRX_IsHoldingPost(m_ControlledEntity))
+			return false;
+
+		return super.SuppressedInCoverCondition();
+	}
+}
+
+modded class SCR_AIDangerReaction_ProjectileHit
+{
+	override bool PerformReaction(notnull SCR_AIUtilityComponent utility, notnull SCR_AIThreatSystem threatSystem, AIDangerEvent dangerEvent, int dangerEventCount)
+	{
+		if (KKCRX_IsHoldingPost(utility.m_OwnerEntity))
+			return true;
+
+		return super.PerformReaction(utility, threatSystem, dangerEvent, dangerEventCount);
+	}
+}
+
+modded class SCR_AIDangerReaction_DamageTaken
+{
+	override bool PerformReaction(notnull SCR_AIUtilityComponent utility, notnull SCR_AIThreatSystem threatSystem, AIDangerEvent dangerEvent, int dangerEventCount)
+	{
+		if (KKCRX_IsHoldingPost(utility.m_OwnerEntity))
+			return true;
+
+		return super.PerformReaction(utility, threatSystem, dangerEvent, dangerEventCount);
+	}
+}
+
+modded class SCR_AIDangerReaction_Explosion
+{
+	override bool PerformReaction(notnull SCR_AIUtilityComponent utility, notnull SCR_AIThreatSystem threatSystem, AIDangerEvent dangerEvent, int dangerEventCount)
+	{
+		if (KKCRX_IsHoldingPost(utility.m_OwnerEntity))
+			return true;
+
+		return super.PerformReaction(utility, threatSystem, dangerEvent, dangerEventCount);
+	}
+}
+
+bool KKCRX_IsHoldingPost(IEntity soldier)
+{
+	return KK_GarrisonHold.IsPinned(soldier);
 }
