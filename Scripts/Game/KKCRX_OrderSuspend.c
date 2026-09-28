@@ -408,6 +408,17 @@ modded class SCR_AICombatComponent
 	)
 	{
 		IEntity owner = GetOwner();
+
+		// Sprinting past a fight outside the building. Koopky wants no
+		// recognition for that stretch, and CRX would put its rates back.
+		if (owner && KK_GarrisonHold.IsIgnoringTargets(owner))
+		{
+			if (perceptionComp)
+				perceptionComp.SetPerceptionFactor(0);
+
+			return;
+		}
+
 		bool sharpOrder =
 			owner &&
 			perceptionComp &&
@@ -435,25 +446,53 @@ modded class SCR_AIAttackBehavior
 	{
 		float score = super.CustomEvaluate();
 
-		IEntity body;
+		IEntity character;
+		IEntity agentEntity;
 		if (m_Utility)
-			body = m_Utility.m_OwnerEntity;
+		{
+			character = m_Utility.m_OwnerEntity;
+			agentEntity = m_Utility.GetOwner();
+		}
 
-		if (!KK_GarrisonHold.IsPinned(body) && m_Utility)
-			body = m_Utility.GetOwner();
+		// CRX calls the base attack evaluate directly, so Koopky's flags
+		// never land when CRX sits between this addon and Koopky.
+		bool pinned =
+			KK_GarrisonHold.IsPinned(character) ||
+			KK_GarrisonHold.IsPinned(agentEntity);
+		bool doorFiring =
+			KK_GarrisonHold.IsDoorFiring(character) ||
+			KK_GarrisonHold.IsDoorFiring(agentEntity);
 
-		if (!KK_GarrisonHold.IsPinned(body))
-			return score;
+		vector approachGoal;
+		bool steering =
+			KK_GarrisonHold.GetApproachGoal(character, approachGoal) ||
+			KK_GarrisonHold.GetApproachGoal(agentEntity, approachGoal);
 
-		// CRX calls the base attack evaluate directly, so Koopky's
-		// "stay on the post" flag never runs when CRX loads later.
-		m_bUseCombatMove = false;
-		KK_GarrisonHold.SetPinned(body, true);
+		if (pinned || doorFiring)
+		{
+			m_bUseCombatMove = false;
+			if (KK_GarrisonHold.IsPinned(character))
+				KK_GarrisonHold.SetPinned(character, true);
+			if (KK_GarrisonHold.IsPinned(agentEntity))
+				KK_GarrisonHold.SetPinned(agentEntity, true);
+		}
+		else if (steering)
+		{
+			m_bUseCombatMove = true;
+		}
+
 		return score;
 	}
 
 	override void InitWaitTime(SCR_AIUtilityComponent utility)
 	{
+		// A shot this addon owns uses Koopky's delay, not CRX's reaction wait.
+		if (utility && KK_GarrisonHold.OwnsShot(utility.m_OwnerEntity))
+		{
+			m_fWaitTime.m_Value = KK_GarrisonHold.ShotDelaySeconds();
+			return;
+		}
+
 		super.InitWaitTime(utility);
 
 		if (
@@ -491,6 +530,50 @@ modded class SCR_AIMoveIndividuallyBehavior
 
 modded class SCR_AICombatMoveLogicBase
 {
+	override ENodeResult EOnTaskSimulate(AIAgent owner, float dt)
+	{
+		IEntity body;
+		if (owner)
+			body = owner.GetControlledEntity();
+
+		if (KK_GarrisonHold.IsPinned(body))
+		{
+			if (m_State && m_State.IsExecutingRequest())
+				m_State.CancelRequest();
+
+			return ENodeResult.RUNNING;
+		}
+
+		vector goal;
+		if (m_Utility && KK_GarrisonHold.GetApproachGoal(body, goal))
+		{
+			SCR_AIBehaviorBase executed =
+				SCR_AIBehaviorBase.Cast(m_Utility.GetExecutedAction());
+
+			if (executed && executed.m_bUseCombatMove)
+			{
+				vector aimPos = goal;
+				if (m_CombatComp)
+				{
+					BaseTarget target = m_CombatComp.GetCurrentTarget();
+					if (target)
+					{
+						IEntity targetEntity = target.GetTargetEntity();
+						if (targetEntity)
+							aimPos = targetEntity.GetOrigin();
+						else
+							aimPos = target.GetLastSeenPosition();
+					}
+				}
+
+				KK_GarrisonHold.SteerToward(m_Utility, goal, aimPos);
+				return ENodeResult.RUNNING;
+			}
+		}
+
+		return super.EOnTaskSimulate(owner, dt);
+	}
+
 	protected override bool SuppressedInCoverCondition()
 	{
 		if (KKCRX_IsHoldingPost(m_Entity) || KKCRX_IsHoldingPost(m_ControlledEntity))
@@ -536,4 +619,183 @@ modded class SCR_AIDangerReaction_Explosion
 bool KKCRX_IsHoldingPost(IEntity soldier)
 {
 	return KK_GarrisonHold.IsPinned(soldier);
+}
+
+modded class SCR_AIRetreatWhileLookAtBehavior
+{
+	override float CustomEvaluate()
+	{
+		if (
+			m_Utility &&
+			(
+				KK_GarrisonHold.IsDoorFiring(m_Utility.m_OwnerEntity) ||
+				KK_GarrisonHold.IsDoorFiring(m_Utility.GetOwner())
+			)
+		)
+		{
+			return 0;
+		}
+
+		return super.CustomEvaluate();
+	}
+}
+
+modded class SCR_AIThreatSystem
+{
+	override void Update(SCR_AIUtilityComponent utility, float timeSlice)
+	{
+		if (
+			m_Utility &&
+			(
+				KK_GarrisonHold.IsIgnoringTargets(m_Utility.m_OwnerEntity) ||
+				KK_GarrisonHold.IsIgnoringTargets(m_Utility.GetOwner())
+			)
+		)
+		{
+			if (m_Agent && m_Agent.GetDangerEventsCount() > 0)
+				m_Agent.ClearDangerEvents(m_Agent.GetDangerEventsCount() + 1);
+
+			KK_IgnoreForSprint();
+			return;
+		}
+
+		super.Update(utility, timeSlice);
+	}
+
+	override void ThreatBulletImpact(int count)
+	{
+		if (KKCRX_SprintIgnoring())
+			return;
+
+		super.ThreatBulletImpact(count);
+	}
+
+	override void ThreatProjectileFlyby(int count)
+	{
+		if (KKCRX_SprintIgnoring())
+			return;
+
+		super.ThreatProjectileFlyby(count);
+	}
+
+	protected bool KKCRX_SprintIgnoring()
+	{
+		return m_Utility &&
+			(
+				KK_GarrisonHold.IsIgnoringTargets(m_Utility.m_OwnerEntity) ||
+				KK_GarrisonHold.IsIgnoringTargets(m_Utility.GetOwner())
+			);
+	}
+}
+
+modded class SCR_AIUtilityComponent
+{
+	override SCR_AIBehaviorBase EvaluateBehavior(BaseTarget unknownTarget)
+	{
+		bool ignore =
+			KK_GarrisonHold.IsIgnoringTargets(m_OwnerEntity) ||
+			KK_GarrisonHold.IsIgnoringTargets(GetOwner());
+
+		if (ignore && m_CombatComponent)
+			m_CombatComponent.KK_ClearTarget();
+
+		SCR_AIBehaviorBase result;
+		if (ignore)
+			result = super.EvaluateBehavior(null);
+		else
+			result = super.EvaluateBehavior(unknownTarget);
+
+		if (ignore)
+			KK_GarrisonHold.EnforceSprintIgnore(this);
+		else if (KK_GarrisonHold.OwnsShot(m_OwnerEntity) || KK_GarrisonHold.OwnsShot(GetOwner()))
+			KK_GarrisonHold.ApplyRoomShot(this);
+		else if (
+			KK_GarrisonHold.IsMoveFire(m_OwnerEntity) ||
+			KK_GarrisonHold.IsMoveFire(GetOwner()) ||
+			KK_GarrisonHold.IsRoomFire(m_OwnerEntity) ||
+			KK_GarrisonHold.IsRoomFire(GetOwner())
+		)
+			KK_GarrisonHold.ApplyMoveFire(this);
+
+		return result;
+	}
+}
+
+modded class SCR_AISetWeaponRaised
+{
+	override ENodeResult EOnTaskSimulate(AIAgent owner, float dt)
+	{
+		IEntity body;
+		if (owner)
+			body = owner.GetControlledEntity();
+
+		if (KK_GarrisonHold.IsIgnoringTargets(body) || KK_GarrisonHold.IsIgnoringTargets(owner))
+		{
+			if (body)
+			{
+				CharacterControllerComponent controller =
+					CharacterControllerComponent.Cast(
+						body.FindComponent(CharacterControllerComponent)
+					);
+
+				if (controller)
+					controller.SetWeaponRaised(false);
+			}
+
+			return ENodeResult.SUCCESS;
+		}
+
+		if (KK_GarrisonHold.OwnsShot(body) || KK_GarrisonHold.OwnsShot(owner))
+		{
+			SCR_ChimeraAIAgent roomSoldier = SCR_ChimeraAIAgent.Cast(owner);
+			if (roomSoldier)
+				KK_GarrisonHold.ApplyRoomShot(roomSoldier.m_UtilityComponent);
+
+			return ENodeResult.SUCCESS;
+		}
+
+		if (
+			KK_GarrisonHold.IsMoveFire(body) ||
+			KK_GarrisonHold.IsMoveFire(owner) ||
+			KK_GarrisonHold.IsRoomFire(body) ||
+			KK_GarrisonHold.IsRoomFire(owner)
+		)
+		{
+			SCR_ChimeraAIAgent soldier = SCR_ChimeraAIAgent.Cast(owner);
+			if (soldier)
+				KK_GarrisonHold.ApplyMoveFire(soldier.m_UtilityComponent);
+
+			return ENodeResult.SUCCESS;
+		}
+
+		return super.EOnTaskSimulate(owner, dt);
+	}
+}
+
+modded class SCR_AILookAction
+{
+	override void LookAt(vector pos, float priority, float duration = 0.8)
+	{
+		if (KKCRX_SprintIgnoring())
+			return;
+
+		super.LookAt(pos, priority, duration);
+	}
+
+	override void LookAt(IEntity ent, float priority, float duration = 0.8)
+	{
+		if (KKCRX_SprintIgnoring())
+			return;
+
+		super.LookAt(ent, priority, duration);
+	}
+
+	protected bool KKCRX_SprintIgnoring()
+	{
+		return m_Utility &&
+			(
+				KK_GarrisonHold.IsIgnoringTargets(m_Utility.m_OwnerEntity) ||
+				KK_GarrisonHold.IsIgnoringTargets(m_Utility.GetOwner())
+			);
+	}
 }
