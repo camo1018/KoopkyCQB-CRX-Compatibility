@@ -444,8 +444,6 @@ modded class SCR_AIAttackBehavior
 {
 	override float CustomEvaluate()
 	{
-		float score = super.CustomEvaluate();
-
 		IEntity character;
 		IEntity agentEntity;
 		if (m_Utility)
@@ -453,6 +451,18 @@ modded class SCR_AIAttackBehavior
 			character = m_Utility.m_OwnerEntity;
 			agentEntity = m_Utility.GetOwner();
 		}
+
+		// An empty gun cannot take the shot. CRX would still score the attack,
+		// and that holds the reload off.
+		if (
+			(KK_GarrisonHold.HasBuilding(character) && KK_GarrisonHold.CannotShoot(character)) ||
+			(KK_GarrisonHold.HasBuilding(agentEntity) && KK_GarrisonHold.CannotShoot(agentEntity))
+		)
+		{
+			return 0;
+		}
+
+		float score = super.CustomEvaluate();
 
 		// CRX calls the base attack evaluate directly, so Koopky's flags
 		// never land when CRX sits between this addon and Koopky.
@@ -717,6 +727,15 @@ modded class SCR_AIUtilityComponent
 		)
 			KK_GarrisonHold.ApplyMoveFire(this);
 
+		if (!ignore)
+		{
+			IEntity soldier = m_OwnerEntity;
+			if (!soldier)
+				soldier = GetOwner();
+
+			KK_GarrisonHold.ConsiderTopOff(soldier);
+		}
+
 		return result;
 	}
 }
@@ -767,6 +786,28 @@ modded class SCR_AISetWeaponRaised
 
 			return ENodeResult.SUCCESS;
 		}
+
+		// The move order raises on a loop. That raise restarts a reload.
+		if (KK_GarrisonHold.IsQuietReload(body) || KK_GarrisonHold.IsQuietReload(owner))
+			return ENodeResult.SUCCESS;
+
+		return super.EOnTaskSimulate(owner, dt);
+	}
+}
+
+modded class SCR_AIUpdateTargetAttackData
+{
+	override ENodeResult EOnTaskSimulate(AIAgent owner, float dt)
+	{
+		IEntity body;
+		if (owner)
+			body = owner.GetControlledEntity();
+
+		// This node aims at the attack target every tick, which restarts the
+		// turn, and CRX lowers the gun when the fire tree has no shot. While
+		// the room gun owns the weapon, that fight is the aim and raise thrash.
+		if (KK_GarrisonHold.CombatOwnsWeapon(body) || KK_GarrisonHold.CombatOwnsWeapon(owner))
+			return ENodeResult.RUNNING;
 
 		return super.EOnTaskSimulate(owner, dt);
 	}
