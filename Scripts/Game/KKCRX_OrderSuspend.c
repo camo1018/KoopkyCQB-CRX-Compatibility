@@ -797,19 +797,23 @@ modded class SCR_AISetWeaponRaised
 
 modded class SCR_AIUpdateTargetAttackData
 {
-	override ENodeResult EOnTaskSimulate(AIAgent owner, float dt)
+	override int ResolveFireTree(
+		BaseTarget target,
+		bool visible,
+		bool weaponReady,
+		out float fireRate)
 	{
 		IEntity body;
-		if (owner)
-			body = owner.GetControlledEntity();
+		if (m_CharacterControllerComponent)
+			body = m_CharacterControllerComponent.GetOwner();
 
-		// This node aims at the attack target every tick, which restarts the
-		// turn, and CRX lowers the gun when the fire tree has no shot. While
-		// the room gun owns the weapon, that fight is the aim and raise thrash.
-		if (KK_GarrisonHold.CombatOwnsWeapon(body) || KK_GarrisonHold.CombatOwnsWeapon(owner))
-			return ENodeResult.RUNNING;
+		// The attack node has to run. It is what points the gun at the target
+		// and brings it up. CRX then drops the gun whenever the fire tree has
+		// no shot, which is the lower-and-raise while the room gun owns it.
+		if (KK_GarrisonHold.CombatOwnsWeapon(body))
+			return vanilla.ResolveFireTree(target, visible, weaponReady, fireRate);
 
-		return super.EOnTaskSimulate(owner, dt);
+		return super.ResolveFireTree(target, visible, weaponReady, fireRate);
 	}
 }
 
