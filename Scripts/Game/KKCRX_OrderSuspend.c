@@ -554,6 +554,16 @@ modded class SCR_AICombatMoveLogicBase
 			return ENodeResult.RUNNING;
 		}
 
+		// An empty gun under fire sprints to Koopky's cover point. CRX's
+		// combat move would replace that sprint with its own cover search.
+		if (KK_GarrisonHold.MustDashToReload(body))
+		{
+			if (m_State && m_State.IsExecutingRequest())
+				m_State.CancelRequest();
+
+			return ENodeResult.RUNNING;
+		}
+
 		vector goal;
 		if (m_Utility && KK_GarrisonHold.GetApproachGoal(body, goal))
 		{
@@ -597,7 +607,7 @@ modded class SCR_AIDangerReaction_ProjectileHit
 {
 	override bool PerformReaction(notnull SCR_AIUtilityComponent utility, notnull SCR_AIThreatSystem threatSystem, AIDangerEvent dangerEvent, int dangerEventCount)
 	{
-		if (KKCRX_IsHoldingPost(utility.m_OwnerEntity))
+		if (KKCRX_IsHoldingPost(utility.m_OwnerEntity) || KKCRX_IsReloadDash(utility.m_OwnerEntity))
 			return true;
 
 		return super.PerformReaction(utility, threatSystem, dangerEvent, dangerEventCount);
@@ -608,7 +618,7 @@ modded class SCR_AIDangerReaction_DamageTaken
 {
 	override bool PerformReaction(notnull SCR_AIUtilityComponent utility, notnull SCR_AIThreatSystem threatSystem, AIDangerEvent dangerEvent, int dangerEventCount)
 	{
-		if (KKCRX_IsHoldingPost(utility.m_OwnerEntity))
+		if (KKCRX_IsHoldingPost(utility.m_OwnerEntity) || KKCRX_IsReloadDash(utility.m_OwnerEntity))
 			return true;
 
 		return super.PerformReaction(utility, threatSystem, dangerEvent, dangerEventCount);
@@ -619,7 +629,7 @@ modded class SCR_AIDangerReaction_Explosion
 {
 	override bool PerformReaction(notnull SCR_AIUtilityComponent utility, notnull SCR_AIThreatSystem threatSystem, AIDangerEvent dangerEvent, int dangerEventCount)
 	{
-		if (KKCRX_IsHoldingPost(utility.m_OwnerEntity))
+		if (KKCRX_IsHoldingPost(utility.m_OwnerEntity) || KKCRX_IsReloadDash(utility.m_OwnerEntity))
 			return true;
 
 		return super.PerformReaction(utility, threatSystem, dangerEvent, dangerEventCount);
@@ -629,6 +639,11 @@ modded class SCR_AIDangerReaction_Explosion
 bool KKCRX_IsHoldingPost(IEntity soldier)
 {
 	return KK_GarrisonHold.IsPinned(soldier);
+}
+
+bool KKCRX_IsReloadDash(IEntity soldier)
+{
+	return KK_GarrisonHold.MustDashToReload(soldier);
 }
 
 modded class SCR_AIRetreatWhileLookAtBehavior
