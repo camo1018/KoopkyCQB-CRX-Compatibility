@@ -67,7 +67,7 @@ class KKCRX_OrderSuspend
 		ApplyLimits(group, groupInfo);
 		CaptureSoldiers(group, state);
 
-		if (state.m_iDepth == 1)
+		if (state.m_iDepth == 1 && SCR_BaseGameMode.KK_LogEnabled())
 		{
 			PrintFormat(
 				"KKCRX: Paused CRX movement settings for %1",
@@ -106,10 +106,13 @@ class KKCRX_OrderSuspend
 		Restore(group, state);
 		s_mGroups.Remove(group);
 
-		PrintFormat(
-			"KKCRX: Restored CRX movement settings for %1",
-			group
-		);
+		if (SCR_BaseGameMode.KK_LogEnabled())
+		{
+			PrintFormat(
+				"KKCRX: Restored CRX movement settings for %1",
+				group
+			);
+		}
 	}
 
 	protected static SCR_AIGroupInfoComponent GetGroupInfo(SCR_AIGroup group)
