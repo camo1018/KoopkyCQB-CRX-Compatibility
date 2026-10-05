@@ -1,5 +1,6 @@
-// Pauses the CRX group and soldier settings that walk men off a Clear or Garrison order.
-// The saved values are written back when the last such order on that group ends.
+// Pauses the CRX group and soldier settings that walk men off a Clear, Garrison,
+// or Take cover order. The saved values are written back when the last such
+// order on that group ends.
 
 class KKCRX_SoldierDanger
 {
@@ -18,6 +19,7 @@ class KKCRX_GroupSuspend
 	int m_iCombatMoveChance;
 	int m_iCombatCoverChance;
 	bool m_bGlobalExclude;
+	bool m_bCombatFrozen;
 
 	bool m_bHadConfig;
 	CRX_EAIReturnToPositionOriginType m_eConfigReturnToPosition;
@@ -46,7 +48,41 @@ class KKCRX_OrderSuspend
 		return mode.KKCRX_GetSuspendDuringOrders();
 	}
 
-	static bool Suspend(SCR_AIGroup group)
+	static bool IsCombatFrozen(SCR_AIGroup group)
+	{
+		if (!group)
+			return false;
+
+		KKCRX_GroupSuspend state = s_mGroups.Get(group);
+		return state && state.m_bCombatFrozen;
+	}
+
+	// Restores combat move and cover chances while the rest of this suspend
+	// stays in place. Take cover at the point resumes the whole suspend
+	// instead, so CRX runs that fight.
+	static void SetTakeCoverCombatFreeze(SCR_AIGroup group, bool frozen)
+	{
+		if (!group)
+			return;
+
+		KKCRX_GroupSuspend state = s_mGroups.Get(group);
+		if (!state || state.m_bCombatFrozen == frozen)
+			return;
+
+		if (!frozen)
+		{
+			ThawCombatMove(group, state);
+			return;
+		}
+
+		SCR_AIGroupInfoComponent groupInfo = GetGroupInfo(group);
+		if (!groupInfo)
+			return;
+
+		FreezeCombatMove(group, groupInfo, state);
+	}
+
+	static bool Suspend(SCR_AIGroup group, bool freezeCombatMove = false)
 	{
 		if (!group || !Replication.IsServer() || !IsEnabled())
 			return false;
@@ -65,6 +101,9 @@ class KKCRX_OrderSuspend
 
 		state.m_iDepth++;
 		ApplyLimits(group, groupInfo);
+		if (freezeCombatMove)
+			FreezeCombatMove(group, groupInfo, state);
+
 		CaptureSoldiers(group, state);
 
 		if (state.m_iDepth == 1 && SCR_BaseGameMode.KK_LogEnabled())
@@ -186,6 +225,54 @@ class KKCRX_OrderSuspend
 		config.m_bConfigFilesSettingsOverrideExclude = true;
 	}
 
+	// Take cover keeps moving through a fight. CRX combat move and cover
+	// search would walk that push off the route, so those chances go to 0
+	// while the order still owns the move. They come back once the fight
+	// at the point is handed to normal attack. Clear and Garrison leave them alone.
+	protected static void FreezeCombatMove(
+		SCR_AIGroup group,
+		SCR_AIGroupInfoComponent groupInfo,
+		KKCRX_GroupSuspend state
+	)
+	{
+		state.m_bCombatFrozen = true;
+		groupInfo.SetCombatMoveChance(0);
+		groupInfo.SetCombatCoverChance(0);
+		groupInfo.SetCombatInCoverDynamicCoverSearchChance(0);
+
+		SCR_AIConfigComponent config = GetConfig(group);
+		if (!config)
+			return;
+
+		config.m_iCombatMoveChance = 0;
+		config.m_iCombatCoverChance = 0;
+		config.m_iCombatInCoverDynamicCoverSearchChance = 0;
+	}
+
+	protected static void ThawCombatMove(SCR_AIGroup group, KKCRX_GroupSuspend state)
+	{
+		state.m_bCombatFrozen = false;
+
+		SCR_AIGroupInfoComponent groupInfo = GetGroupInfo(group);
+		if (groupInfo)
+		{
+			groupInfo.SetCombatMoveChance(state.m_iCombatMoveChance);
+			groupInfo.SetCombatCoverChance(state.m_iCombatCoverChance);
+			groupInfo.SetCombatInCoverDynamicCoverSearchChance(state.m_iInCoverSearchChance);
+		}
+
+		if (!state.m_bHadConfig)
+			return;
+
+		SCR_AIConfigComponent config = GetConfig(group);
+		if (!config)
+			return;
+
+		config.m_iCombatMoveChance = state.m_iConfigCombatMoveChance;
+		config.m_iCombatCoverChance = state.m_iConfigCombatCoverChance;
+		config.m_iCombatInCoverDynamicCoverSearchChance = state.m_iConfigInCoverSearchChance;
+	}
+
 	protected static void CaptureSoldiers(SCR_AIGroup group, KKCRX_GroupSuspend state)
 	{
 		array<AIAgent> agents = {};
@@ -264,7 +351,7 @@ class KKCRX_OrderSuspend
 
 modded class SCR_BaseGameMode
 {
-	[Attribute("1", UIWidgets.CheckBox, "While a Clear or Garrison order is running, pause the CRX settings that pull soldiers off that order.", category: "Koopky CQB CRX")]
+	[Attribute("1", UIWidgets.CheckBox, "While a Clear, Garrison, or Take cover order is running, pause the CRX settings that pull soldiers off that order.", category: "Koopky CQB CRX")]
 	protected bool m_bKKCRX_SuspendDuringOrders;
 
 	bool KKCRX_GetSuspendDuringOrders()
@@ -305,6 +392,18 @@ modded class KK_ClearBuildingActivity
 		KKCRX_TryResume();
 	}
 
+	override void OnActionRemoved()
+	{
+		super.OnActionRemoved();
+		KKCRX_TryResume();
+	}
+
+	override void Supersede()
+	{
+		super.Supersede();
+		KKCRX_TryResume();
+	}
+
 	protected void KKCRX_TrySuspend()
 	{
 		if (
@@ -321,9 +420,11 @@ modded class KK_ClearBuildingActivity
 			m_bKKCRX_Suspended = true;
 	}
 
+	// A restart that keeps this same activity is not a cancel. CRX stays
+	// paused until this clear is finished, cancelled, or replaced.
 	protected void KKCRX_TryResume()
 	{
-		if (!m_bKKCRX_Suspended)
+		if (!m_bKKCRX_Suspended || IsLive())
 			return;
 
 		m_bKKCRX_Suspended = false;
@@ -363,6 +464,18 @@ modded class KK_GarrisonBuildingActivity
 		KKCRX_TryResume();
 	}
 
+	override void OnActionRemoved()
+	{
+		super.OnActionRemoved();
+		KKCRX_TryResume();
+	}
+
+	override void Supersede()
+	{
+		super.Supersede();
+		KKCRX_TryResume();
+	}
+
 	protected void KKCRX_TrySuspend()
 	{
 		if (
@@ -379,9 +492,109 @@ modded class KK_GarrisonBuildingActivity
 			m_bKKCRX_Suspended = true;
 	}
 
+	// A restart that keeps this same activity is not a cancel. CRX stays
+	// paused until this garrison is finished, cancelled, or replaced.
+	protected void KKCRX_TryResume()
+	{
+		if (!m_bKKCRX_Suspended || IsLive())
+			return;
+
+		m_bKKCRX_Suspended = false;
+		KKCRX_OrderSuspend.Resume(m_Group);
+	}
+}
+
+modded class KK_AttackActivity
+{
+	protected bool m_bKKCRX_Suspended;
+
+	override void OnActionSelected()
+	{
+		super.OnActionSelected();
+		KKCRX_TrySuspend();
+	}
+
+	override float CustomEvaluate()
+	{
+		float score = super.CustomEvaluate();
+		KKCRX_SyncSuspend();
+		return score;
+	}
+
+	override void OnActionDeselected()
+	{
+		super.OnActionDeselected();
+		if (!IsLive())
+			KKCRX_TryResume();
+	}
+
+	override void OnActionFailed()
+	{
+		super.OnActionFailed();
+		if (!IsLive())
+			KKCRX_TryResume();
+	}
+
+	override void OnActionRemoved()
+	{
+		super.OnActionRemoved();
+		if (!IsLive())
+			KKCRX_TryResume();
+	}
+
+	override void Supersede()
+	{
+		super.Supersede();
+		KKCRX_TryResume();
+	}
+
+	protected void KKCRX_SyncSuspend()
+	{
+		// The fight at the point belongs to CRX again. A push or a bound
+		// still holds those settings off. One man running back does not.
+		if (!IsTakeCover() || KKCRX_FightYielded())
+		{
+			KKCRX_TryResume();
+			return;
+		}
+
+		if (!m_bKKCRX_Suspended)
+			KKCRX_TrySuspend();
+		else
+			KKCRX_OrderSuspend.CaptureLateSoldiers(m_Group);
+	}
+
+	protected bool KKCRX_FightYielded()
+	{
+		return ReleasedToFight();
+	}
+
+	protected void KKCRX_TrySuspend()
+	{
+		if (
+			m_bKKCRX_Suspended ||
+			m_bFinished ||
+			m_bCancelled ||
+			!m_AttackWaypoint ||
+			!IsTakeCover()
+		)
+		{
+			return;
+		}
+
+		if (KKCRX_OrderSuspend.Suspend(m_Group, true))
+			m_bKKCRX_Suspended = true;
+	}
+
+	// A restart that keeps this same activity is not a handoff. CRX stays
+	// paused until the order ends, unless a man at the point has been
+	// given to the fight.
 	protected void KKCRX_TryResume()
 	{
 		if (!m_bKKCRX_Suspended)
+			return;
+
+		if (IsLive() && !ReleasedToFight())
 			return;
 
 		m_bKKCRX_Suspended = false;
@@ -441,6 +654,36 @@ modded class SCR_AICombatComponent
 		if (sharpOrder)
 			KK_PerceptionBoost.KKCRX_SetActive(owner, true);
 	}
+
+	override void EvaluateWeaponAndTarget(
+		out bool outWeaponEvent,
+		out bool outSelectedTargetChanged,
+		out BaseTarget outPrevTarget,
+		out BaseTarget outCurrentTarget,
+		out bool outRetreatTargetChanged,
+		out bool outCompartmentChanged)
+	{
+		super.EvaluateWeaponAndTarget(
+			outWeaponEvent,
+			outSelectedTargetChanged,
+			outPrevTarget,
+			outCurrentTarget,
+			outRetreatTargetChanged,
+			outCompartmentChanged
+		);
+
+		// A cover hold stands against something solid. This order's sight
+		// trace hits that cover. Keep a living target the normal attack
+		// can still see when CRX's own pass does not.
+		IEntity owner = GetOwner();
+		if (!owner || !KK_GarrisonHold.IsPinned(owner) || !KK_GarrisonHold.IsFreshOrder(owner))
+			return;
+
+		if (!m_SelectedTarget || !KK_GarrisonHold.IsLivingTarget(m_SelectedTarget))
+			return;
+
+		KK_GarrisonHold.EndFreshOrder(owner);
+	}
 }
 
 modded class SCR_AIAttackBehavior
@@ -455,11 +698,30 @@ modded class SCR_AIAttackBehavior
 			agentEntity = m_Utility.GetOwner();
 		}
 
-		// An empty gun cannot take the shot. CRX would still score the attack,
-		// and that holds the reload off.
+		// A remembered burst is not a target. CRX calls the base attack
+		// directly, so this order would keep firing at that spot.
+		bool onOrder =
+			KK_GarrisonHold.UseRoomCombat() &&
+			(
+				KK_GarrisonHold.HasBuilding(character) ||
+				KK_GarrisonHold.HasBuilding(agentEntity)
+			);
+		if (
+			onOrder &&
+			!KK_GarrisonHold.HasVisibleEnemy(character) &&
+			!KK_GarrisonHold.HasVisibleEnemy(agentEntity)
+		)
+		{
+			return 0;
+		}
+
+		// An empty gun cannot take the shot. A reload under pressure has to
+		// leave so the move to cover can run. CRX would still score the attack.
 		if (
 			(KK_GarrisonHold.HasBuilding(character) && KK_GarrisonHold.CannotShoot(character)) ||
-			(KK_GarrisonHold.HasBuilding(agentEntity) && KK_GarrisonHold.CannotShoot(agentEntity))
+			(KK_GarrisonHold.HasBuilding(agentEntity) && KK_GarrisonHold.CannotShoot(agentEntity)) ||
+			(KK_GarrisonHold.HasBuilding(character) && KK_GarrisonHold.MustDashToReload(character)) ||
+			(KK_GarrisonHold.HasBuilding(agentEntity) && KK_GarrisonHold.MustDashToReload(agentEntity))
 		)
 		{
 			return 0;
@@ -530,6 +792,33 @@ modded class SCR_AIMoveIndividuallyBehavior
 		if (m_Utility)
 			body = m_Utility.m_OwnerEntity;
 
+		bool routeLocked =
+			KKCRX_IsTakeCoverLocked(body) ||
+			KK_GarrisonHold.IsBoundSprint(body) ||
+			KK_GarrisonHold.IsRecalled(body);
+		if (m_Utility)
+		{
+			routeLocked = routeLocked ||
+				KKCRX_IsTakeCoverLocked(m_Utility.GetOwner()) ||
+				KK_GarrisonHold.IsBoundSprint(m_Utility.GetOwner()) ||
+				KK_GarrisonHold.IsRecalled(m_Utility.GetOwner());
+		}
+
+		// Take cover's own move has to keep running. A bound sprint does too.
+		// CRX would raise it to attack priority, and that hands the push to an aimed strafe.
+		if (routeLocked)
+		{
+			float score = vanilla.CustomEvaluate();
+			IEntity soldier = body;
+			if (!soldier && m_Utility)
+				soldier = m_Utility.GetOwner();
+
+			KKCRX_KeepBoundSprint(soldier);
+			KKCRX_HoldPinned(soldier);
+			KKCRX_KeepRecall(soldier);
+			return score;
+		}
+
 		if (!KK_GarrisonHold.IsPinned(body))
 			return super.CustomEvaluate();
 
@@ -549,7 +838,44 @@ modded class SCR_AICombatMoveLogicBase
 		if (owner)
 			body = owner.GetControlledEntity();
 
-		if (KK_GarrisonHold.IsPinned(body))
+		bool holdRoute =
+			KK_GarrisonHold.IsPinned(body) ||
+			KK_GarrisonHold.IsPinned(owner) ||
+			KKCRX_IsTakeCoverLocked(body) ||
+			KKCRX_IsTakeCoverLocked(owner) ||
+			KK_GarrisonHold.IsBoundSprint(body) ||
+			KK_GarrisonHold.IsBoundSprint(owner) ||
+			KK_GarrisonHold.IsRecalled(body) ||
+			KK_GarrisonHold.IsRecalled(owner);
+
+		if (holdRoute)
+		{
+			if (m_State && m_State.IsExecutingRequest())
+				m_State.CancelRequest();
+
+			IEntity soldier = body;
+			if (!soldier)
+				soldier = owner;
+
+			KKCRX_KeepBoundSprint(soldier);
+			KKCRX_HoldPinned(soldier);
+			KKCRX_KeepRecall(soldier);
+			return ENodeResult.RUNNING;
+		}
+
+		// A raised threat keeps requesting a short strafe after the enemy
+		// is gone. CRX calls the base combat move, so hold the node instead.
+		bool onOrder =
+			KK_GarrisonHold.UseRoomCombat() &&
+			(
+				KK_GarrisonHold.HasBuilding(body) ||
+				KK_GarrisonHold.HasBuilding(owner)
+			);
+		if (
+			onOrder &&
+			!KK_GarrisonHold.HasVisibleEnemy(body) &&
+			!KK_GarrisonHold.HasVisibleEnemy(owner)
+		)
 		{
 			if (m_State && m_State.IsExecutingRequest())
 				m_State.CancelRequest();
@@ -578,15 +904,13 @@ modded class SCR_AICombatMoveLogicBase
 				vector aimPos = goal;
 				if (m_CombatComp)
 				{
-					BaseTarget target = m_CombatComp.GetCurrentTarget();
-					if (target)
-					{
-						IEntity targetEntity = target.GetTargetEntity();
-						if (targetEntity)
-							aimPos = targetEntity.GetOrigin();
-						else
-							aimPos = target.GetLastSeenPosition();
-					}
+				BaseTarget target = m_CombatComp.GetCurrentTarget();
+				if (target && KK_GarrisonHold.IsLivingTarget(target))
+				{
+					IEntity targetEntity = target.GetTargetEntity();
+					if (targetEntity)
+						aimPos = KK_GarrisonHold.ShotAimPoint(targetEntity);
+				}
 				}
 
 				KK_GarrisonHold.SteerToward(m_Utility, goal, aimPos);
@@ -602,6 +926,9 @@ modded class SCR_AICombatMoveLogicBase
 		if (KKCRX_IsHoldingPost(m_Entity) || KKCRX_IsHoldingPost(m_ControlledEntity))
 			return false;
 
+		if (KKCRX_IsTakeCoverLocked(m_Entity) || KKCRX_IsTakeCoverLocked(m_ControlledEntity))
+			return false;
+
 		return super.SuppressedInCoverCondition();
 	}
 }
@@ -610,7 +937,7 @@ modded class SCR_AIDangerReaction_ProjectileHit
 {
 	override bool PerformReaction(notnull SCR_AIUtilityComponent utility, notnull SCR_AIThreatSystem threatSystem, AIDangerEvent dangerEvent, int dangerEventCount)
 	{
-		if (KKCRX_IsHoldingPost(utility.m_OwnerEntity) || KKCRX_IsReloadDash(utility.m_OwnerEntity))
+		if (KKCRX_IsHoldingPost(utility.m_OwnerEntity) || KKCRX_IsReloadDash(utility.m_OwnerEntity) || KKCRX_IsTakeCoverLocked(utility.m_OwnerEntity) || KK_GarrisonHold.IsRecalled(utility.m_OwnerEntity))
 			return true;
 
 		return super.PerformReaction(utility, threatSystem, dangerEvent, dangerEventCount);
@@ -621,7 +948,7 @@ modded class SCR_AIDangerReaction_DamageTaken
 {
 	override bool PerformReaction(notnull SCR_AIUtilityComponent utility, notnull SCR_AIThreatSystem threatSystem, AIDangerEvent dangerEvent, int dangerEventCount)
 	{
-		if (KKCRX_IsHoldingPost(utility.m_OwnerEntity) || KKCRX_IsReloadDash(utility.m_OwnerEntity))
+		if (KKCRX_IsHoldingPost(utility.m_OwnerEntity) || KKCRX_IsReloadDash(utility.m_OwnerEntity) || KKCRX_IsTakeCoverLocked(utility.m_OwnerEntity) || KK_GarrisonHold.IsRecalled(utility.m_OwnerEntity))
 			return true;
 
 		return super.PerformReaction(utility, threatSystem, dangerEvent, dangerEventCount);
@@ -632,7 +959,7 @@ modded class SCR_AIDangerReaction_Explosion
 {
 	override bool PerformReaction(notnull SCR_AIUtilityComponent utility, notnull SCR_AIThreatSystem threatSystem, AIDangerEvent dangerEvent, int dangerEventCount)
 	{
-		if (KKCRX_IsHoldingPost(utility.m_OwnerEntity) || KKCRX_IsReloadDash(utility.m_OwnerEntity))
+		if (KKCRX_IsHoldingPost(utility.m_OwnerEntity) || KKCRX_IsReloadDash(utility.m_OwnerEntity) || KKCRX_IsTakeCoverLocked(utility.m_OwnerEntity) || KK_GarrisonHold.IsRecalled(utility.m_OwnerEntity))
 			return true;
 
 		return super.PerformReaction(utility, threatSystem, dangerEvent, dangerEventCount);
@@ -644,9 +971,189 @@ bool KKCRX_IsHoldingPost(IEntity soldier)
 	return KK_GarrisonHold.IsPinned(soldier);
 }
 
+// The bound runner has to keep the sprint Koopky issued. CRX aims that
+// step at the enemy, and the sprint becomes a sidestep. Lowering the rifle
+// again, or cancelling the look at the route, stops the step instead.
+void KKCRX_KeepBoundSprint(IEntity soldier)
+{
+	if (!KK_GarrisonHold.IsBoundSprint(soldier))
+		return;
+
+	IEntity body = soldier;
+	AIAgent agent = AIAgent.Cast(soldier);
+	if (agent)
+		body = agent.GetControlledEntity();
+
+	if (!body)
+		body = soldier;
+
+	CharacterControllerComponent controller = CharacterControllerComponent.Cast(
+		body.FindComponent(CharacterControllerComponent)
+	);
+	if (controller && (controller.IsWeaponRaised() || controller.IsWeaponADS()))
+	{
+		controller.SetWeaponADS(false);
+		controller.SetWeaponRaised(false);
+	}
+
+	AICharacterMovementComponent movement = AICharacterMovementComponent.Cast(
+		body.FindComponent(AICharacterMovementComponent)
+	);
+	if (movement)
+		movement.SetMovementTypeWanted(EMovementType.SPRINT);
+
+	SCR_AIUtilityComponent utility = SCR_AIUtilityComponent.Cast(
+		body.FindComponent(SCR_AIUtilityComponent)
+	);
+	if (!utility && agent)
+	{
+		utility = SCR_AIUtilityComponent.Cast(
+			agent.FindComponent(SCR_AIUtilityComponent)
+		);
+	}
+
+	if (!utility || !utility.m_CombatMoveState)
+		return;
+
+	utility.m_CombatMoveState.m_bAimAtTarget = false;
+}
+
+// A man walked back to the point keeps that run. CRX is still on for the
+// others, and aiming this step at the enemy turns it into a sidestep.
+void KKCRX_KeepRecall(IEntity soldier)
+{
+	if (!KK_GarrisonHold.IsRecalled(soldier))
+		return;
+
+	IEntity body = soldier;
+	AIAgent agent = AIAgent.Cast(soldier);
+	if (agent)
+		body = agent.GetControlledEntity();
+
+	if (!body)
+		body = soldier;
+
+	AICharacterMovementComponent movement = AICharacterMovementComponent.Cast(
+		body.FindComponent(AICharacterMovementComponent)
+	);
+	if (movement)
+		movement.SetMovementTypeWanted(EMovementType.RUN);
+
+	SCR_AIUtilityComponent utility = SCR_AIUtilityComponent.Cast(
+		body.FindComponent(SCR_AIUtilityComponent)
+	);
+	if (!utility && agent)
+	{
+		utility = SCR_AIUtilityComponent.Cast(
+			agent.FindComponent(SCR_AIUtilityComponent)
+		);
+	}
+
+	if (!utility || !utility.m_CombatMoveState)
+		return;
+
+	utility.m_CombatMoveState.m_bAimAtTarget = false;
+}
+
+// A soldier who has stopped to shoot is pinned. CRX still aims the move
+// that was just cancelled, and that aim turns the stop into a sidestep.
+void KKCRX_HoldPinned(IEntity soldier)
+{
+	if (!KK_GarrisonHold.IsPinned(soldier) || KK_GarrisonHold.IsBoundSprint(soldier))
+		return;
+
+	IEntity body = soldier;
+	AIAgent agent = AIAgent.Cast(soldier);
+	if (agent)
+		body = agent.GetControlledEntity();
+
+	if (!body)
+		body = soldier;
+
+	AICharacterMovementComponent movement = AICharacterMovementComponent.Cast(
+		body.FindComponent(AICharacterMovementComponent)
+	);
+	if (movement)
+		movement.SetMovementTypeWanted(EMovementType.IDLE);
+
+	SCR_AIUtilityComponent utility = SCR_AIUtilityComponent.Cast(
+		body.FindComponent(SCR_AIUtilityComponent)
+	);
+	if (!utility && agent)
+	{
+		utility = SCR_AIUtilityComponent.Cast(
+			agent.FindComponent(SCR_AIUtilityComponent)
+		);
+	}
+
+	if (!utility || !utility.m_CombatMoveState)
+		return;
+
+	utility.m_CombatMoveState.m_bAimAtTarget = false;
+}
+
+bool KKCRX_IsTakeCoverLocked(IEntity soldier)
+{
+	if (!soldier)
+		return false;
+
+	AIAgent agent = AIAgent.Cast(soldier);
+	if (!agent)
+	{
+		AIControlComponent control = AIControlComponent.Cast(
+			soldier.FindComponent(AIControlComponent)
+		);
+		if (control)
+			agent = control.GetAIAgent();
+	}
+
+	if (!agent)
+		return false;
+
+	SCR_AIGroup group = SCR_AIGroup.Cast(agent);
+	if (!group)
+		group = SCR_AIGroup.Cast(agent.GetParentGroup());
+
+	return KKCRX_OrderSuspend.IsCombatFrozen(group);
+}
+
 bool KKCRX_IsReloadDash(IEntity soldier)
 {
 	return KK_GarrisonHold.MustDashToReload(soldier);
+}
+
+modded class SCR_AIAvoidCharacterBehavior
+{
+	override float CustomEvaluate()
+	{
+		if (!m_Utility)
+			return super.CustomEvaluate();
+
+		// CRX calls the base avoid directly, so a pin or a take cover push
+		// never reaches Koopky. Either one has to stay on the spot.
+		if (
+			m_Utility &&
+			(
+				KK_GarrisonHold.IsPinned(m_Utility.m_OwnerEntity) ||
+				KK_GarrisonHold.IsPinned(m_Utility.GetOwner()) ||
+				KK_GarrisonHold.IsDoorFiring(m_Utility.m_OwnerEntity) ||
+				KK_GarrisonHold.IsDoorFiring(m_Utility.GetOwner()) ||
+				KK_GarrisonHold.SprintBeforeReload(m_Utility.m_OwnerEntity) ||
+				KK_GarrisonHold.SprintBeforeReload(m_Utility.GetOwner()) ||
+				KK_GarrisonHold.IsReloadBashing(m_Utility.m_OwnerEntity) ||
+				KK_GarrisonHold.IsReloadBashing(m_Utility.GetOwner()) ||
+				KKCRX_IsTakeCoverLocked(m_Utility.m_OwnerEntity) ||
+				KKCRX_IsTakeCoverLocked(m_Utility.GetOwner()) ||
+				KK_GarrisonHold.IsRecalled(m_Utility.m_OwnerEntity) ||
+				KK_GarrisonHold.IsRecalled(m_Utility.GetOwner())
+			)
+		)
+		{
+			return 0;
+		}
+
+		return super.CustomEvaluate();
+	}
 }
 
 modded class SCR_AIRetreatWhileLookAtBehavior
@@ -657,7 +1164,17 @@ modded class SCR_AIRetreatWhileLookAtBehavior
 			m_Utility &&
 			(
 				KK_GarrisonHold.IsDoorFiring(m_Utility.m_OwnerEntity) ||
-				KK_GarrisonHold.IsDoorFiring(m_Utility.GetOwner())
+				KK_GarrisonHold.IsDoorFiring(m_Utility.GetOwner()) ||
+				KK_GarrisonHold.IsPinned(m_Utility.m_OwnerEntity) ||
+				KK_GarrisonHold.IsPinned(m_Utility.GetOwner()) ||
+				KK_GarrisonHold.SprintBeforeReload(m_Utility.m_OwnerEntity) ||
+				KK_GarrisonHold.SprintBeforeReload(m_Utility.GetOwner()) ||
+				KK_GarrisonHold.IsReloadBashing(m_Utility.m_OwnerEntity) ||
+				KK_GarrisonHold.IsReloadBashing(m_Utility.GetOwner()) ||
+				KKCRX_IsTakeCoverLocked(m_Utility.m_OwnerEntity) ||
+				KKCRX_IsTakeCoverLocked(m_Utility.GetOwner()) ||
+				KK_GarrisonHold.IsRecalled(m_Utility.m_OwnerEntity) ||
+				KK_GarrisonHold.IsRecalled(m_Utility.GetOwner())
 			)
 		)
 		{
@@ -687,6 +1204,31 @@ modded class SCR_AIThreatSystem
 			return;
 		}
 
+		// A selected last-seen point sets endangered back to full on every
+		// update. Drop it before that, until this order sees someone.
+		// A cover hold keeps the living target. The sight trace hits the
+		// cover he is planted against.
+		bool coverHold =
+			m_Utility &&
+			(
+				KK_GarrisonHold.IsPinned(m_Utility.m_OwnerEntity) ||
+				KK_GarrisonHold.IsPinned(m_Utility.GetOwner())
+			);
+		if (
+			m_Utility &&
+			!coverHold &&
+			(
+				KK_GarrisonHold.IsFreshOrder(m_Utility.m_OwnerEntity) ||
+				KK_GarrisonHold.IsFreshOrder(m_Utility.GetOwner())
+			) &&
+			!KK_GarrisonHold.HasVisibleEnemy(m_Utility.m_OwnerEntity) &&
+			!KK_GarrisonHold.HasVisibleEnemy(m_Utility.GetOwner()) &&
+			m_Utility.m_CombatComponent
+		)
+		{
+			m_Utility.m_CombatComponent.KK_ClearTarget();
+		}
+
 		super.Update(utility, timeSlice);
 	}
 
@@ -696,6 +1238,22 @@ modded class SCR_AIThreatSystem
 			return;
 
 		super.ThreatBulletImpact(count);
+	}
+
+	override void ThreatExplosion(float distance)
+	{
+		if (KKCRX_SprintIgnoring())
+			return;
+
+		super.ThreatExplosion(distance);
+	}
+
+	override void ThreatShotFired(float distance, int count)
+	{
+		if (KKCRX_SprintIgnoring())
+			return;
+
+		super.ThreatShotFired(distance, count);
 	}
 
 	override void ThreatProjectileFlyby(int count)
@@ -727,8 +1285,25 @@ modded class SCR_AIUtilityComponent
 		if (ignore && m_CombatComponent)
 			m_CombatComponent.KK_ClearTarget();
 
+		// The previous fight's unknown point would start an investigate
+		// on a house he was just told to clear again. CRX calls the base
+		// evaluate, so that point has to be dropped here.
+		bool freshOrder =
+			KK_GarrisonHold.IsFreshOrder(m_OwnerEntity) ||
+			KK_GarrisonHold.IsFreshOrder(GetOwner());
+		IEntity viewer = m_OwnerEntity;
+		if (!viewer)
+			viewer = GetOwner();
+		bool staleUnknown =
+			freshOrder &&
+			(
+				!unknownTarget ||
+				!KK_GarrisonHold.IsLivingTarget(unknownTarget) ||
+				!KK_GarrisonHold.SeesTarget(viewer, unknownTarget)
+			);
+
 		SCR_AIBehaviorBase result;
-		if (ignore)
+		if (ignore || staleUnknown)
 			result = super.EvaluateBehavior(null);
 		else
 			result = super.EvaluateBehavior(unknownTarget);
@@ -752,6 +1327,55 @@ modded class SCR_AIUtilityComponent
 				soldier = GetOwner();
 
 			KK_GarrisonHold.ConsiderTopOff(soldier);
+			KK_GarrisonHold.KeepClearWeaponRaised(soldier);
+		}
+
+		return result;
+	}
+}
+
+modded class SCR_AICharacterSetMovementSpeed
+{
+	override ENodeResult EOnTaskSimulate(AIAgent owner, float dt)
+	{
+		IEntity body;
+		if (owner)
+			body = owner.GetControlledEntity();
+
+		ENodeResult result = super.EOnTaskSimulate(owner, dt);
+
+		// CRX writes the speed from the tree after the order. An aimed
+		// bound was coming out as a walk. Put the sprint back after the
+		// tree has accepted the move. The rifle-up node can sit on a tree
+		// CRX no longer uses for this step, so the jog and the hold raise here.
+		if (KK_GarrisonHold.IsBoundSprint(body) || KK_GarrisonHold.IsBoundSprint(owner))
+			KKCRX_KeepBoundSprint(body);
+		else if (KK_GarrisonHold.IsRecalled(body) || KK_GarrisonHold.IsRecalled(owner))
+			KKCRX_KeepRecall(body);
+		else
+		{
+			KKCRX_HoldPinned(body);
+			KKCRX_HoldPinned(owner);
+
+			if (
+				KK_GarrisonHold.IsMoveFire(body) ||
+				KK_GarrisonHold.IsMoveFire(owner) ||
+				KK_GarrisonHold.IsRoomFire(body) ||
+				KK_GarrisonHold.IsRoomFire(owner)
+			)
+			{
+				SCR_ChimeraAIAgent moving = SCR_ChimeraAIAgent.Cast(owner);
+				if (moving)
+					KK_GarrisonHold.ApplyMoveFire(moving.m_UtilityComponent);
+			}
+			else
+			{
+				IEntity soldier = body;
+				if (!soldier)
+					soldier = owner;
+
+				KK_GarrisonHold.KeepClearWeaponRaised(soldier);
+			}
 		}
 
 		return result;
@@ -782,12 +1406,37 @@ modded class SCR_AISetWeaponRaised
 			return ENodeResult.SUCCESS;
 		}
 
+		// A bound sprint cannot keep the rifle up. The raise would cut the run.
+		if (KK_GarrisonHold.IsBoundSprint(body) || KK_GarrisonHold.IsBoundSprint(owner))
+		{
+			if (body)
+			{
+				CharacterControllerComponent controller =
+					CharacterControllerComponent.Cast(
+						body.FindComponent(CharacterControllerComponent)
+					);
+
+				// Sending the lower again restarts it and cuts the step off.
+				if (controller && (controller.IsWeaponRaised() || controller.IsWeaponADS()))
+				{
+					controller.SetWeaponADS(false);
+					controller.SetWeaponRaised(false);
+				}
+			}
+
+			return ENodeResult.SUCCESS;
+		}
+
 		if (KK_GarrisonHold.OwnsShot(body) || KK_GarrisonHold.OwnsShot(owner))
 		{
 			SCR_ChimeraAIAgent roomSoldier = SCR_ChimeraAIAgent.Cast(owner);
 			if (roomSoldier)
 				KK_GarrisonHold.ApplyRoomShot(roomSoldier.m_UtilityComponent);
 
+			IEntity clearer = body;
+			if (!clearer)
+				clearer = owner;
+			KK_GarrisonHold.KeepClearWeaponRaised(clearer);
 			return ENodeResult.SUCCESS;
 		}
 
@@ -809,6 +1458,23 @@ modded class SCR_AISetWeaponRaised
 		if (KK_GarrisonHold.IsQuietReload(body) || KK_GarrisonHold.IsQuietReload(owner))
 			return ENodeResult.SUCCESS;
 
+		if (
+			KK_GarrisonHold.SprintBeforeReload(body) ||
+			KK_GarrisonHold.SprintBeforeReload(owner) ||
+			KK_GarrisonHold.IsReloadBashing(body) ||
+			KK_GarrisonHold.IsReloadBashing(owner)
+		)
+		{
+			KK_GarrisonHold.LowerForReloadSprint(owner);
+			return ENodeResult.SUCCESS;
+		}
+
+		IEntity clearer = body;
+		if (!clearer)
+			clearer = owner;
+		if (KK_GarrisonHold.KeepClearWeaponRaised(clearer))
+			return ENodeResult.SUCCESS;
+
 		return super.EOnTaskSimulate(owner, dt);
 	}
 }
@@ -828,7 +1494,13 @@ modded class SCR_AIUpdateTargetAttackData
 		// The attack node has to run. It is what points the gun at the target
 		// and brings it up. CRX then drops the gun whenever the fire tree has
 		// no shot, which is the lower-and-raise while the room gun owns it.
-		if (KK_GarrisonHold.CombatOwnsWeapon(body))
+		// An attack jog keeps the rifle up the same way. A bound sprint must
+		// not take CRX's raise, or the lower restarts and the step stops.
+		if (
+			KK_GarrisonHold.CombatOwnsWeapon(body) ||
+			KK_GarrisonHold.AttackWeaponStaysUp(body) ||
+			KK_GarrisonHold.IsBoundSprint(body)
+		)
 			return vanilla.ResolveFireTree(target, visible, weaponReady, fireRate);
 
 		return super.ResolveFireTree(target, visible, weaponReady, fireRate);
@@ -842,15 +1514,37 @@ modded class SCR_AILookAction
 		if (KKCRX_SprintIgnoring())
 			return;
 
+		// Facing along the route has to run, or the step never starts.
+		// CRX turns that look toward the enemy, and the sprint becomes a strafe.
+		if (KKCRX_BoundSprinting())
+		{
+			vanilla.LookAt(pos, priority, duration);
+			return;
+		}
+
 		super.LookAt(pos, priority, duration);
 	}
 
 	override void LookAt(IEntity ent, float priority, float duration = 0.8)
 	{
-		if (KKCRX_SprintIgnoring())
+		// Facing the enemy turns the sprint into a strafe. A look along
+		// the route still has to run, or the step never starts.
+		if (KKCRX_SprintIgnoring() || KKCRX_BoundSprinting())
 			return;
 
 		super.LookAt(ent, priority, duration);
+	}
+
+	// A look at the threat while the bound is sprinting becomes a strafe.
+	protected bool KKCRX_BoundSprinting()
+	{
+		if (!m_Utility)
+			return false;
+
+		return KK_GarrisonHold.IsBoundSprint(m_Utility.m_OwnerEntity) ||
+			KK_GarrisonHold.IsBoundSprint(m_Utility.GetOwner()) ||
+			KK_GarrisonHold.IsRecalled(m_Utility.m_OwnerEntity) ||
+			KK_GarrisonHold.IsRecalled(m_Utility.GetOwner());
 	}
 
 	protected bool KKCRX_SprintIgnoring()
