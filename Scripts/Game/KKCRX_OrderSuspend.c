@@ -672,6 +672,25 @@ modded class SCR_AICombatComponent
 			outCompartmentChanged
 		);
 
+		// CRX selects the enemy again after Koopky clears him. That
+		// selection aims the bound, and the aimed bound will not sprint.
+		// The enemy he already had is kept, and put back when the sprint ends.
+		IEntity sprinting = GetOwner();
+		if (sprinting && KK_GarrisonHold.IsBoundSprint(sprinting))
+		{
+			KK_GarrisonHold.RememberSprintEnemy(sprinting, m_SelectedTarget);
+			KK_ClearTarget();
+			m_SelectedTargetVisible = false;
+			outCurrentTarget = null;
+			outSelectedTargetChanged = false;
+			vector lane;
+			if (KK_GarrisonHold.GetSprintLook(sprinting, lane))
+				m_SelectedTargetDestinationPos = lane;
+			return;
+		}
+
+		KK_HoldSprintEnemy(outCurrentTarget);
+
 		// A cover hold stands against something solid. This order's sight
 		// trace hits that cover. Keep a living target the normal attack
 		// can still see when CRX's own pass does not.
@@ -817,6 +836,14 @@ modded class SCR_AIMoveIndividuallyBehavior
 			IEntity soldier = body;
 			if (!soldier && m_Utility)
 				soldier = m_Utility.GetOwner();
+
+			// The bound's move is the sprint. Combat movement on that
+			// behavior is the strafe toward the enemy.
+			if (
+				KK_GarrisonHold.IsBoundSprint(soldier) ||
+				(m_Utility && KK_GarrisonHold.IsBoundSprint(m_Utility.GetOwner()))
+			)
+				m_bUseCombatMove = false;
 
 			KKCRX_KeepBoundSprint(soldier);
 			KKCRX_HoldPinned(soldier);
@@ -1024,6 +1051,42 @@ void KKCRX_KeepBoundSprint(IEntity soldier)
 	if (!body)
 		body = soldier;
 
+	SCR_AIUtilityComponent utility = SCR_AIUtilityComponent.Cast(
+		body.FindComponent(SCR_AIUtilityComponent)
+	);
+	if (!utility && agent)
+	{
+		utility = SCR_AIUtilityComponent.Cast(
+			agent.FindComponent(SCR_AIUtilityComponent)
+		);
+	}
+
+	// The request still running is the walk at the enemy. Sprint that,
+	// and he leaves the waypoint. Drop it before the speed is put back.
+	if (utility && utility.m_CombatMoveState)
+	{
+		if (utility.m_CombatMoveState.IsExecutingRequest())
+			utility.m_CombatMoveState.CancelRequest();
+
+		utility.m_CombatMoveState.EnableAiming(false);
+		utility.m_CombatMoveState.m_bAimAtTarget = false;
+	}
+
+	if (utility && utility.m_LookAction)
+	{
+		vector lane;
+		if (KK_GarrisonHold.GetSprintLook(body, lane))
+		{
+			utility.m_LookAction.KK_Snap(
+				lane,
+				SCR_AILookAction.PRIO_COMMANDER,
+				8
+			);
+		}
+		else
+			utility.m_LookAction.KKCRX_ReleaseRoute();
+	}
+
 	CharacterControllerComponent controller = CharacterControllerComponent.Cast(
 		body.FindComponent(CharacterControllerComponent)
 	);
@@ -1038,27 +1101,6 @@ void KKCRX_KeepBoundSprint(IEntity soldier)
 	);
 	if (movement)
 		movement.SetMovementTypeWanted(EMovementType.SPRINT);
-
-	SCR_AIUtilityComponent utility = SCR_AIUtilityComponent.Cast(
-		body.FindComponent(SCR_AIUtilityComponent)
-	);
-	if (!utility && agent)
-	{
-		utility = SCR_AIUtilityComponent.Cast(
-			agent.FindComponent(SCR_AIUtilityComponent)
-		);
-	}
-
-	if (!utility)
-		return;
-
-	if (utility.m_LookAction)
-		utility.m_LookAction.KKCRX_ReleaseRoute();
-
-	if (!utility.m_CombatMoveState)
-		return;
-
-	utility.m_CombatMoveState.m_bAimAtTarget = false;
 }
 
 // A man walked back to the point keeps that run. CRX is still on for the
@@ -1076,12 +1118,6 @@ void KKCRX_KeepRecall(IEntity soldier)
 	if (!body)
 		body = soldier;
 
-	AICharacterMovementComponent movement = AICharacterMovementComponent.Cast(
-		body.FindComponent(AICharacterMovementComponent)
-	);
-	if (movement)
-		movement.SetMovementTypeWanted(EMovementType.RUN);
-
 	SCR_AIUtilityComponent utility = SCR_AIUtilityComponent.Cast(
 		body.FindComponent(SCR_AIUtilityComponent)
 	);
@@ -1092,16 +1128,23 @@ void KKCRX_KeepRecall(IEntity soldier)
 		);
 	}
 
-	if (!utility)
-		return;
+	if (utility && utility.m_CombatMoveState)
+	{
+		if (utility.m_CombatMoveState.IsExecutingRequest())
+			utility.m_CombatMoveState.CancelRequest();
 
-	if (utility.m_LookAction)
+		utility.m_CombatMoveState.EnableAiming(false);
+		utility.m_CombatMoveState.m_bAimAtTarget = false;
+	}
+
+	if (utility && utility.m_LookAction)
 		utility.m_LookAction.KKCRX_ReleaseRoute();
 
-	if (!utility.m_CombatMoveState)
-		return;
-
-	utility.m_CombatMoveState.m_bAimAtTarget = false;
+	AICharacterMovementComponent movement = AICharacterMovementComponent.Cast(
+		body.FindComponent(AICharacterMovementComponent)
+	);
+	if (movement)
+		movement.SetMovementTypeWanted(EMovementType.RUN);
 }
 
 // A soldier who has stopped to shoot is pinned. CRX still aims the move
@@ -1186,6 +1229,13 @@ bool KKCRX_OnRoute(IEntity soldier)
 		return false;
 
 	return !KK_GarrisonHold.IsPinned(soldier);
+}
+
+// The pair that is sprinting, and a man walked back to the point.
+// Either one turns into a strafe when the head goes to a target.
+bool KKCRX_IsDashing(IEntity soldier)
+{
+	return KK_GarrisonHold.IsBoundSprint(soldier) || KK_GarrisonHold.IsRecalled(soldier);
 }
 
 bool KKCRX_IsReloadDash(IEntity soldier)
@@ -1381,6 +1431,20 @@ modded class SCR_AIUtilityComponent
 
 		if (ignore)
 			KK_GarrisonHold.EnforceSprintIgnore(this);
+		else if (
+			KKCRX_IsDashing(m_OwnerEntity) ||
+			KKCRX_IsDashing(GetOwner())
+		)
+		{
+			// Before the sprint move exists, the last fight is still
+			// walking him at the enemy. That request is what he sprints.
+			IEntity soldier = m_OwnerEntity;
+			if (!soldier)
+				soldier = GetOwner();
+
+			KKCRX_KeepBoundSprint(soldier);
+			KKCRX_KeepRecall(soldier);
+		}
 		else if (KK_GarrisonHold.OwnsShot(m_OwnerEntity) || KK_GarrisonHold.OwnsShot(GetOwner()))
 			KK_GarrisonHold.ApplyRoomShot(this);
 		else if (
@@ -1552,6 +1616,24 @@ modded class SCR_AISetWeaponRaised
 
 modded class SCR_AIUpdateTargetAttackData
 {
+	override ENodeResult EOnTaskSimulate(AIAgent owner, float dt)
+	{
+		IEntity body;
+		if (owner)
+			body = owner.GetControlledEntity();
+
+		// A lowered rifle is "look at the target" in this node. That look
+		// is the running pair turning onto the enemy. No aim on this step.
+		if (KKCRX_IsDashing(body) || KKCRX_IsDashing(owner))
+		{
+			SetVariableOut(PORT_FIRE_TREE_ID, FIRE_TREE_INVALID);
+			SetVariableOut(PORT_VISIBLE, false);
+			return ENodeResult.SUCCESS;
+		}
+
+		return super.EOnTaskSimulate(owner, dt);
+	}
+
 	override int ResolveFireTree(
 		BaseTarget target,
 		bool visible,
@@ -1562,15 +1644,16 @@ modded class SCR_AIUpdateTargetAttackData
 		if (m_CharacterControllerComponent)
 			body = m_CharacterControllerComponent.GetOwner();
 
+		if (KKCRX_IsDashing(body))
+			return FIRE_TREE_INVALID;
+
 		// The attack node has to run. It is what points the gun at the target
 		// and brings it up. CRX then drops the gun whenever the fire tree has
 		// no shot, which is the lower-and-raise while the room gun owns it.
-		// An attack jog keeps the rifle up the same way. A bound sprint must
-		// not take CRX's raise, or the lower restarts and the step stops.
+		// An attack jog keeps the rifle up the same way.
 		if (
 			KK_GarrisonHold.CombatOwnsWeapon(body) ||
-			KK_GarrisonHold.AttackWeaponStaysUp(body) ||
-			KK_GarrisonHold.IsBoundSprint(body)
+			KK_GarrisonHold.AttackWeaponStaysUp(body)
 		)
 			return vanilla.ResolveFireTree(target, visible, weaponReady, fireRate);
 
@@ -1583,6 +1666,11 @@ modded class SCR_AILookAction
 	override void LookAt(vector pos, float priority, float duration = 0.8)
 	{
 		if (KKCRX_SprintIgnoring())
+			return;
+
+		// The lane look is already on him. A look at the enemy, applied
+		// and then replaced, is the turn off the sprint and back.
+		if (KKCRX_LookDashing())
 			return;
 
 		// An enemy look is 80, and an unidentified man is 50. Either one
@@ -1610,7 +1698,10 @@ modded class SCR_AILookAction
 	{
 		// Facing the enemy turns the sprint into a strafe. A look along
 		// the route still has to run, or the step never starts.
-		if (KKCRX_SprintIgnoring() || KKCRX_LookOnRoute())
+		if (KKCRX_SprintIgnoring() || KKCRX_LookDashing())
+			return;
+
+		if (KKCRX_LookOnRoute())
 		{
 			KKCRX_ReleaseRoute();
 			KKCRX_RestoreRoute();
@@ -1621,14 +1712,92 @@ modded class SCR_AILookAction
 		KKCRX_RelockHold();
 	}
 
-	// Drops a look that is already on a man. A look along the route stays.
+	// Drops a look that is already on a man. The lane snap outranks him,
+	// and cancelling that snap is what lets the head swing back.
 	void KKCRX_ReleaseRoute()
 	{
+		if (m_fPriority >= SCR_AILookAction.PRIO_COMMANDER)
+			return;
+
 		if (m_vPosition == vector.Zero || !KKCRX_LookAtContact(m_vPosition))
 			return;
 
 		Cancel();
 	}
+
+	// The behavior tree finishes a look on its own timer and CRX then
+	// aims the head at the enemy. While he is sprinting, that finish
+	// is what swings him off the lane and back.
+	override void Complete()
+	{
+		if (KKCRX_LookDashing() && m_fPriority >= SCR_AILookAction.PRIO_COMMANDER)
+			return;
+
+		super.Complete();
+	}
+
+	override void MoveLookParametersToNode(
+		out bool outCanLook,
+		out vector outLookPos,
+		out float outLookDuration,
+		out bool outCancelLook,
+		out bool outRestartLook)
+	{
+		// CRX's own look runs in this call and points him at the enemy.
+		// The next pass points him down the lane. That pair of writes is
+		// the head thrash. While he is sprinting, this node does not
+		// enter CRX, and it does not restart the turn.
+		if (KKCRX_LookDashing())
+		{
+			vector lane;
+			IEntity body;
+			if (m_Utility)
+				body = m_Utility.m_OwnerEntity;
+
+			bool haveLane = KK_GarrisonHold.GetSprintLook(body, lane);
+			if (!haveLane && m_Utility)
+				haveLane = KK_GarrisonHold.GetSprintLook(m_Utility.GetOwner(), lane);
+
+			m_bCancelLook = false;
+			m_bRestartLook = false;
+
+			if (!haveLane)
+			{
+				outCanLook = false;
+				outCancelLook = false;
+				outRestartLook = false;
+				outLookPos = vector.Zero;
+				outLookDuration = 0;
+				return;
+			}
+
+			// Once, to take the head off the enemy. After that the point
+			// moves with him and the turn is not started again.
+			bool restart = !m_bKKLaneHeld;
+			m_bKKLaneHeld = true;
+
+			outCanLook = true;
+			outCancelLook = false;
+			outRestartLook = restart;
+			outLookPos = lane;
+			outLookDuration = 8;
+			m_vPosition = lane;
+			m_fPriority = SCR_AILookAction.PRIO_COMMANDER;
+			m_fDuration = 8;
+			return;
+		}
+
+		m_bKKLaneHeld = false;
+		super.MoveLookParametersToNode(
+			outCanLook,
+			outLookPos,
+			outLookDuration,
+			outCancelLook,
+			outRestartLook
+		);
+	}
+
+	protected bool m_bKKLaneHeld;
 
 	protected void KKCRX_RestoreRoute()
 	{
@@ -1666,6 +1835,15 @@ modded class SCR_AILookAction
 			KKCRX_OnRoute(m_Utility.GetOwner());
 	}
 
+	protected bool KKCRX_LookDashing()
+	{
+		if (!m_Utility)
+			return false;
+
+		return KKCRX_IsDashing(m_Utility.m_OwnerEntity) ||
+			KKCRX_IsDashing(m_Utility.GetOwner());
+	}
+
 	protected bool KKCRX_LookAtContact(vector pos)
 	{
 		if (!m_Utility)
@@ -1696,11 +1874,21 @@ modded class SCR_AILookAction
 			return false;
 
 		array<BaseTarget> seen = {};
-		perception.GetTargetsList(seen, ETargetCategory.ENEMY);
-		foreach (BaseTarget candidate : seen)
+		for (int category = 0; category < 3; category++)
 		{
-			if (KKCRX_CloseToTarget(pos, candidate))
-				return true;
+			ETargetCategory kind = ETargetCategory.ENEMY;
+			if (category == 1)
+				kind = ETargetCategory.DETECTED;
+			else if (category == 2)
+				kind = ETargetCategory.UNKNOWN;
+
+			seen.Clear();
+			perception.GetTargetsList(seen, kind);
+			foreach (BaseTarget candidate : seen)
+			{
+				if (KKCRX_CloseToTarget(pos, candidate))
+					return true;
+			}
 		}
 
 		return false;
@@ -1711,11 +1899,18 @@ modded class SCR_AILookAction
 		if (!target)
 			return false;
 
-		vector at = target.GetLastSeenPosition();
-		IEntity body = target.GetTargetEntity();
-		if (body)
-			at = body.GetOrigin();
+		if (KKCRX_CloseToPoint(pos, target.GetLastSeenPosition()))
+			return true;
 
+		IEntity body = target.GetTargetEntity();
+		if (!body)
+			return false;
+
+		return KKCRX_CloseToPoint(pos, body.GetOrigin());
+	}
+
+	protected bool KKCRX_CloseToPoint(vector pos, vector at)
+	{
 		vector flat = pos - at;
 		flat[1] = 0;
 		return flat.Length() <= 6;
@@ -1728,5 +1923,37 @@ modded class SCR_AILookAction
 				KK_GarrisonHold.IsIgnoringTargets(m_Utility.m_OwnerEntity) ||
 				KK_GarrisonHold.IsIgnoringTargets(m_Utility.GetOwner())
 			);
+	}
+}
+
+// Outermost, so CRX cannot accept a combat move during the bound.
+// That request is the walk toward the enemy. The sprint is the order.
+modded class SCR_AICombatMoveState
+{
+	override void ApplyNewRequest(notnull SCR_AICombatMoveRequestBase request)
+	{
+		if (KK_GarrisonHold.IsSprintMoveLocked(this))
+		{
+			request.m_eState = SCR_EAICombatMoveRequestState.CANCELED;
+			if (m_Request && m_Request.m_eState == SCR_EAICombatMoveRequestState.EXECUTING)
+				m_Request.m_eState = SCR_EAICombatMoveRequestState.CANCELED;
+
+			m_Request = null;
+			m_bAimAtTarget = false;
+			return;
+		}
+
+		super.ApplyNewRequest(request);
+	}
+
+	override void EnableAiming(bool enable)
+	{
+		if (enable && KK_GarrisonHold.IsSprintMoveLocked(this))
+		{
+			m_bAimAtTarget = false;
+			return;
+		}
+
+		super.EnableAiming(enable);
 	}
 }
