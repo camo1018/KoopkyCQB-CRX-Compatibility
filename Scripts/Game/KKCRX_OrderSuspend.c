@@ -57,31 +57,6 @@ class KKCRX_OrderSuspend
 		return state && state.m_bCombatFrozen;
 	}
 
-	// Restores combat move and cover chances while the rest of this suspend
-	// stays in place. Take cover at the point resumes the whole suspend
-	// instead, so CRX runs that fight.
-	static void SetTakeCoverCombatFreeze(SCR_AIGroup group, bool frozen)
-	{
-		if (!group)
-			return;
-
-		KKCRX_GroupSuspend state = s_mGroups.Get(group);
-		if (!state || state.m_bCombatFrozen == frozen)
-			return;
-
-		if (!frozen)
-		{
-			ThawCombatMove(group, state);
-			return;
-		}
-
-		SCR_AIGroupInfoComponent groupInfo = GetGroupInfo(group);
-		if (!groupInfo)
-			return;
-
-		FreezeCombatMove(group, groupInfo, state);
-	}
-
 	static bool Suspend(SCR_AIGroup group, bool freezeCombatMove = false)
 	{
 		if (!group || !Replication.IsServer() || !IsEnabled())
@@ -227,8 +202,7 @@ class KKCRX_OrderSuspend
 
 	// Take cover keeps moving through a fight. CRX combat move and cover
 	// search would walk that push off the route, so those chances go to 0
-	// while the order still owns the move. They come back once the fight
-	// at the point is handed to normal attack. Clear and Garrison leave them alone.
+	// while the order still owns the move. Resume puts the saved chances back.
 	protected static void FreezeCombatMove(
 		SCR_AIGroup group,
 		SCR_AIGroupInfoComponent groupInfo,
@@ -247,30 +221,6 @@ class KKCRX_OrderSuspend
 		config.m_iCombatMoveChance = 0;
 		config.m_iCombatCoverChance = 0;
 		config.m_iCombatInCoverDynamicCoverSearchChance = 0;
-	}
-
-	protected static void ThawCombatMove(SCR_AIGroup group, KKCRX_GroupSuspend state)
-	{
-		state.m_bCombatFrozen = false;
-
-		SCR_AIGroupInfoComponent groupInfo = GetGroupInfo(group);
-		if (groupInfo)
-		{
-			groupInfo.SetCombatMoveChance(state.m_iCombatMoveChance);
-			groupInfo.SetCombatCoverChance(state.m_iCombatCoverChance);
-			groupInfo.SetCombatInCoverDynamicCoverSearchChance(state.m_iInCoverSearchChance);
-		}
-
-		if (!state.m_bHadConfig)
-			return;
-
-		SCR_AIConfigComponent config = GetConfig(group);
-		if (!config)
-			return;
-
-		config.m_iCombatMoveChance = state.m_iConfigCombatMoveChance;
-		config.m_iCombatCoverChance = state.m_iConfigCombatCoverChance;
-		config.m_iCombatInCoverDynamicCoverSearchChance = state.m_iConfigInCoverSearchChance;
 	}
 
 	protected static void CaptureSoldiers(SCR_AIGroup group, KKCRX_GroupSuspend state)
@@ -1036,8 +986,9 @@ bool KKCRX_IsHoldingPost(IEntity soldier)
 }
 
 // The bound runner has to keep the sprint Koopky issued. CRX aims that
-// step at the enemy, and the sprint becomes a sidestep. Lowering the rifle
-// again, or cancelling the look at the route, stops the step instead.
+// step at the enemy, and the sprint becomes a sidestep. The look stays on
+// the lane from the look node. This only keeps the rifle down and the
+// speed on sprint, and drops a combat move that is already running.
 void KKCRX_KeepBoundSprint(IEntity soldier)
 {
 	if (!KK_GarrisonHold.IsBoundSprint(soldier))
@@ -1072,18 +1023,12 @@ void KKCRX_KeepBoundSprint(IEntity soldier)
 		utility.m_CombatMoveState.m_bAimAtTarget = false;
 	}
 
+	// No lane stored yet. A look already on a man would turn this sprint
+	// into a strafe. A commander look is the lane itself, and this leaves it.
 	if (utility && utility.m_LookAction)
 	{
 		vector lane;
-		if (KK_GarrisonHold.GetSprintLook(body, lane))
-		{
-			utility.m_LookAction.KK_Snap(
-				lane,
-				SCR_AILookAction.PRIO_COMMANDER,
-				8
-			);
-		}
-		else
+		if (!KK_GarrisonHold.GetSprintLook(body, lane))
 			utility.m_LookAction.KKCRX_ReleaseRoute();
 	}
 
