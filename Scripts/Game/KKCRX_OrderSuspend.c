@@ -662,6 +662,16 @@ modded class SCR_AICombatComponent
 
 		KK_GarrisonHold.EndFreshOrder(owner);
 	}
+
+	// A nearby casualty while the room is empty starts a rearm, and the
+	// rearm drops the rifle. Inside a clear the route still owns that rifle.
+	override void TryRearming()
+	{
+		if (KKCRX_RifleStaysUp(GetOwner(), null))
+			return;
+
+		super.TryRearming();
+	}
 }
 
 modded class SCR_AIAttackBehavior
@@ -866,6 +876,7 @@ modded class SCR_AIMoveIndividuallyBehavior
 			return;
 
 		m_Utility.GetCallqueue().Remove(LowerWeaponDelayed);
+		m_Utility.GetCallqueue().Remove(ProvideAmmoOrPickupInventoryItemsDelayed);
 	}
 
 	override void LowerWeaponDelayed()
@@ -874,6 +885,77 @@ modded class SCR_AIMoveIndividuallyBehavior
 			return;
 
 		super.LowerWeaponDelayed();
+	}
+
+	// Queued beside the other lower whenever a provide-ammo or pickup
+	// action exists. A clear reissues the move, so this was still dropping
+	// the rifle a few hundred milliseconds into the step and changing the
+	// speed under it.
+	override void ProvideAmmoOrPickupInventoryItemsDelayed(bool provideAmmoBehavior)
+	{
+		if (m_Utility && KKCRX_RifleStaysUp(m_Utility.m_OwnerEntity, m_Utility.GetOwner()))
+			return;
+
+		super.ProvideAmmoOrPickupInventoryItemsDelayed(provideAmmoBehavior);
+	}
+}
+
+// Formation's selection drops the rifle with no check. A clear does not
+// use that move. Skipping CRX here leaves the rifle on the route.
+modded class SCR_AIMoveInFormationBehavior
+{
+	override void OnActionSelected()
+	{
+		if (m_Utility && KKCRX_RifleStaysUp(m_Utility.m_OwnerEntity, m_Utility.GetOwner()))
+		{
+			vanilla.OnActionSelected();
+			return;
+		}
+
+		super.OnActionSelected();
+	}
+
+	override float CustomEvaluate()
+	{
+		IEntity body;
+		if (m_Utility)
+			body = m_Utility.m_OwnerEntity;
+
+		bool clearing =
+			KK_GarrisonHold.IsClearing(body) ||
+			(m_Utility && KK_GarrisonHold.IsClearing(m_Utility.GetOwner()));
+		if (clearing)
+			return vanilla.CustomEvaluate();
+
+		return super.CustomEvaluate();
+	}
+}
+
+// Idle drops the rifle when CRX still has the weapon on autonomous.
+// Holding it raised has to win for the whole clear, including a gap
+// between move orders.
+modded class SCR_AIIdleBehavior
+{
+	override void OnActionSelected()
+	{
+		if (m_Utility && KKCRX_RifleStaysUp(m_Utility.m_OwnerEntity, m_Utility.GetOwner()))
+		{
+			vanilla.OnActionSelected();
+			return;
+		}
+
+		super.OnActionSelected();
+	}
+}
+
+modded class SCR_AIMedicHealBehavior
+{
+	override void MedicHealBehaviorDelayed()
+	{
+		if (m_Utility && KKCRX_RifleStaysUp(m_Utility.m_OwnerEntity, m_Utility.GetOwner()))
+			return;
+
+		super.MedicHealBehaviorDelayed();
 	}
 }
 
