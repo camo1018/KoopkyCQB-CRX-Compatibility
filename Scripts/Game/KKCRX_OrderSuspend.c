@@ -854,6 +854,27 @@ modded class SCR_AIMoveIndividuallyBehavior
 
 		return 0;
 	}
+
+	override void OnActionSelected()
+	{
+		super.OnActionSelected();
+
+		// CRX queues a lower a few hundred milliseconds after every move.
+		// A clear reissues that move along the route, so the lower keeps
+		// landing on a rifle Koopky just raised.
+		if (!m_Utility || !KKCRX_RifleStaysUp(m_Utility.m_OwnerEntity, m_Utility.GetOwner()))
+			return;
+
+		m_Utility.GetCallqueue().Remove(LowerWeaponDelayed);
+	}
+
+	override void LowerWeaponDelayed()
+	{
+		if (m_Utility && KKCRX_RifleStaysUp(m_Utility.m_OwnerEntity, m_Utility.GetOwner()))
+			return;
+
+		super.LowerWeaponDelayed();
+	}
 }
 
 modded class SCR_AICombatMoveLogicBase
@@ -1041,6 +1062,61 @@ modded class SCR_AIDangerReaction_Explosion
 bool KKCRX_IsHoldingPost(IEntity soldier)
 {
 	return KK_GarrisonHold.IsPinned(soldier);
+}
+
+// A clear or an attack still wants the rifle up. A reload, an empty gun,
+// a bash, and a sprint are not in this, so those lowers still run.
+bool KKCRX_RifleStaysUp(IEntity soldier, IEntity other)
+{
+	return KKCRX_OneRifleStaysUp(soldier) || KKCRX_OneRifleStaysUp(other);
+}
+
+bool KKCRX_OneRifleStaysUp(IEntity soldier)
+{
+	return KK_GarrisonHold.ClearWeaponStaysUp(soldier) ||
+		KK_GarrisonHold.AttackWeaponStaysUp(soldier) ||
+		KK_GarrisonHold.CombatOwnsWeapon(soldier);
+}
+
+// Soldiers whose weapon mode we changed from autonomous to raised.
+// Putting autonomous back is limited to that set.
+ref set<SCR_AIInfoComponent> s_KKCRX_HeldWeaponMode = new set<SCR_AIInfoComponent>();
+
+void KKCRX_HoldWeaponMode(IEntity soldier)
+{
+	SCR_AIInfoComponent info = KKCRX_Info(soldier);
+	if (!info || info.GetWeaponRaised() != CRX_EAIWeaponRaised.AUTONOMOUS)
+		return;
+
+	info.SetWeaponRaised(CRX_EAIWeaponRaised.RAISE);
+	s_KKCRX_HeldWeaponMode.Insert(info);
+}
+
+void KKCRX_ReleaseWeaponMode(IEntity soldier)
+{
+	SCR_AIInfoComponent info = KKCRX_Info(soldier);
+	if (!info || !s_KKCRX_HeldWeaponMode.Contains(info))
+		return;
+
+	s_KKCRX_HeldWeaponMode.RemoveItem(info);
+	if (info.GetWeaponRaised() == CRX_EAIWeaponRaised.RAISE)
+		info.SetWeaponRaised(CRX_EAIWeaponRaised.AUTONOMOUS);
+}
+
+SCR_AIInfoComponent KKCRX_Info(IEntity soldier)
+{
+	if (!soldier)
+		return null;
+
+	IEntity body = soldier;
+	AIAgent agent = AIAgent.Cast(soldier);
+	if (agent)
+		body = agent.GetControlledEntity();
+
+	if (!body)
+		return null;
+
+	return SCR_AIInfoComponent.Cast(body.FindComponent(SCR_AIInfoComponent));
 }
 
 // The bound runner has to keep the sprint Koopky issued. CRX aims that
@@ -1530,6 +1606,8 @@ modded class SCR_AICharacterSetMovementSpeed
 					soldier = owner;
 
 				KK_GarrisonHold.KeepClearWeaponRaised(soldier);
+				if (KKCRX_RifleStaysUp(soldier, owner))
+					KKCRX_HoldWeaponMode(soldier);
 			}
 		}
 
@@ -1547,6 +1625,9 @@ modded class SCR_AISetWeaponRaised
 
 		if (KK_GarrisonHold.IsIgnoringTargets(body) || KK_GarrisonHold.IsIgnoringTargets(owner))
 		{
+			KKCRX_ReleaseWeaponMode(body);
+			KKCRX_ReleaseWeaponMode(owner);
+
 			if (body)
 			{
 				CharacterControllerComponent controller =
@@ -1564,6 +1645,9 @@ modded class SCR_AISetWeaponRaised
 		// A bound sprint cannot keep the rifle up. The raise would cut the run.
 		if (KK_GarrisonHold.IsBoundSprint(body) || KK_GarrisonHold.IsBoundSprint(owner))
 		{
+			KKCRX_ReleaseWeaponMode(body);
+			KKCRX_ReleaseWeaponMode(owner);
+
 			if (body)
 			{
 				CharacterControllerComponent controller =
@@ -1592,6 +1676,8 @@ modded class SCR_AISetWeaponRaised
 			if (!clearer)
 				clearer = owner;
 			KK_GarrisonHold.KeepClearWeaponRaised(clearer);
+			if (KKCRX_RifleStaysUp(clearer, owner))
+				KKCRX_HoldWeaponMode(clearer);
 			return ENodeResult.SUCCESS;
 		}
 
@@ -1620,6 +1706,8 @@ modded class SCR_AISetWeaponRaised
 			KK_GarrisonHold.IsReloadBashing(owner)
 		)
 		{
+			KKCRX_ReleaseWeaponMode(body);
+			KKCRX_ReleaseWeaponMode(owner);
 			KK_GarrisonHold.LowerForReloadSprint(owner);
 			return ENodeResult.SUCCESS;
 		}
@@ -1628,7 +1716,13 @@ modded class SCR_AISetWeaponRaised
 		if (!clearer)
 			clearer = owner;
 		if (KK_GarrisonHold.KeepClearWeaponRaised(clearer))
+		{
+			// RAISE makes CRX skip the tree port. That port is the lower.
+			KKCRX_HoldWeaponMode(clearer);
 			return ENodeResult.SUCCESS;
+		}
+
+		KKCRX_ReleaseWeaponMode(clearer);
 
 		return super.EOnTaskSimulate(owner, dt);
 	}
@@ -1664,7 +1758,19 @@ modded class SCR_AIUpdateTargetAttackData
 		if (m_CharacterControllerComponent)
 			body = m_CharacterControllerComponent.GetOwner();
 
-		if (KKCRX_IsDashing(body))
+		IEntity utilityBody;
+		IEntity utilityOwner;
+		if (m_UtilityComponent)
+		{
+			utilityBody = m_UtilityComponent.m_OwnerEntity;
+			utilityOwner = m_UtilityComponent.GetOwner();
+		}
+
+		if (
+			KKCRX_IsDashing(body) ||
+			KKCRX_IsDashing(utilityBody) ||
+			KKCRX_IsDashing(utilityOwner)
+		)
 			return FIRE_TREE_INVALID;
 
 		// The attack node has to run. It is what points the gun at the target
@@ -1672,11 +1778,8 @@ modded class SCR_AIUpdateTargetAttackData
 		// no shot, which is the lower-and-raise while the room gun owns it.
 		// An attack jog keeps the rifle up the same way. A clear does too,
 		// or the next raise cuts the step off and he shuffles.
-		if (
-			KK_GarrisonHold.CombatOwnsWeapon(body) ||
-			KK_GarrisonHold.AttackWeaponStaysUp(body) ||
-			KK_GarrisonHold.ClearWeaponStaysUp(body)
-		)
+		// vanilla skips that drop. super is CRX, and the drop is in there.
+		if (KKCRX_RifleStaysUp(body, utilityBody) || KKCRX_RifleStaysUp(utilityOwner, null))
 			return vanilla.ResolveFireTree(target, visible, weaponReady, fireRate);
 
 		return super.ResolveFireTree(target, visible, weaponReady, fireRate);
