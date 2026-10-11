@@ -641,6 +641,15 @@ modded class SCR_AICombatComponent
 
 		KK_HoldSprintEnemy(outCurrentTarget);
 
+		// CRX puts the last-seen point back after Koopky clears it. That
+		// point is what keeps the rifle firing along the old direction
+		// once the building order has ended.
+		if (KK_GarrisonHold.IsFreshOrder(GetOwner()) && KK_DropStaleTarget())
+		{
+			outCurrentTarget = null;
+			outSelectedTargetChanged = false;
+		}
+
 		// A cover hold stands against something solid. This order's sight
 		// trace hits that cover. Keep a living target the normal attack
 		// can still see when CRX's own pass does not.
@@ -671,6 +680,17 @@ modded class SCR_AIAttackBehavior
 		// that look walks the sprint. A man held on the spot can still shoot.
 		if (KKCRX_OnRoute(character) || KKCRX_OnRoute(agentEntity))
 			return 0;
+
+		// Within range of the building, the route stays selected. CRX's
+		// attack plants him, and the room gun fires without it. Farther
+		// out, this attack still scores.
+		if (
+			(KK_GarrisonHold.IsClearing(character) && KK_GarrisonHold.OwnsShot(character)) ||
+			(KK_GarrisonHold.IsClearing(agentEntity) && KK_GarrisonHold.OwnsShot(agentEntity))
+		)
+		{
+			return 0;
+		}
 
 		// A remembered burst is not a target. CRX calls the base attack
 		// directly, so this order would keep firing at that spot.
@@ -705,6 +725,12 @@ modded class SCR_AIAttackBehavior
 
 		// CRX calls the base attack evaluate directly, so Koopky's flags
 		// never land when CRX sits between this addon and Koopky.
+		// Within range of the building, a clear does not take the combat
+		// step. CRX turns that step into a short standing strafe. Farther
+		// out, the attack keeps the step.
+		bool clearingInside =
+			(KK_GarrisonHold.IsClearing(character) && KK_GarrisonHold.OwnsShot(character)) ||
+			(KK_GarrisonHold.IsClearing(agentEntity) && KK_GarrisonHold.OwnsShot(agentEntity));
 		bool pinned =
 			KK_GarrisonHold.IsPinned(character) ||
 			KK_GarrisonHold.IsPinned(agentEntity);
@@ -717,7 +743,7 @@ modded class SCR_AIAttackBehavior
 			KK_GarrisonHold.GetApproachGoal(character, approachGoal) ||
 			KK_GarrisonHold.GetApproachGoal(agentEntity, approachGoal);
 
-		if (pinned || doorFiring)
+		if (clearingInside || pinned || doorFiring)
 		{
 			m_bUseCombatMove = false;
 			if (KK_GarrisonHold.IsPinned(character))
@@ -776,6 +802,24 @@ modded class SCR_AIMoveIndividuallyBehavior
 				KKCRX_IsTakeCoverLocked(m_Utility.GetOwner()) ||
 				KK_GarrisonHold.IsBoundSprint(m_Utility.GetOwner()) ||
 				KK_GarrisonHold.IsRecalled(m_Utility.GetOwner());
+		}
+
+		// A clear inside the building keeps the route score. CRX drops a
+		// high move to 70 or 90 once he has a target, and that hands him
+		// to the attack. The attack plants him. The room gun still fires.
+		bool clearing =
+			KK_GarrisonHold.IsClearing(body) ||
+			(m_Utility && KK_GarrisonHold.IsClearing(m_Utility.GetOwner()));
+		if (
+			clearing &&
+			(
+				KK_GarrisonHold.OwnsShot(body) ||
+				(m_Utility && KK_GarrisonHold.OwnsShot(m_Utility.GetOwner()))
+			)
+		)
+		{
+			m_bUseCombatMove = false;
+			return vanilla.CustomEvaluate();
 		}
 
 		// Take cover's own move has to keep running. A bound sprint does too.
@@ -847,14 +891,20 @@ modded class SCR_AICombatMoveLogicBase
 
 		// A raised threat keeps requesting a short strafe after the enemy
 		// is gone. CRX calls the base combat move, so hold the node instead.
+		// A clear is not in this loop. The request is refused when CRX
+		// submits it, which is the indoor standing strafe.
 		bool onOrder =
 			KK_GarrisonHold.UseRoomCombat() &&
 			(
 				KK_GarrisonHold.HasBuilding(body) ||
 				KK_GarrisonHold.HasBuilding(owner)
 			);
+		bool clearing =
+			KK_GarrisonHold.IsClearing(body) ||
+			KK_GarrisonHold.IsClearing(owner);
 		if (
 			onOrder &&
+			!clearing &&
 			!KK_GarrisonHold.HasVisibleEnemy(body) &&
 			!KK_GarrisonHold.HasVisibleEnemy(owner)
 		)
@@ -940,7 +990,15 @@ modded class SCR_AIGetCombatMoveRequestParameters_Move
 		if (owner)
 			body = owner.GetControlledEntity();
 
-		if (KKCRX_OnRoute(body) || KKCRX_OnRoute(owner))
+		// Inside a building, CRX rewrites this request into a short standing
+		// strafe. On a clear that strafe is the shuffle, so the request
+		// keeps the normal parameters and the route stays the move order.
+		if (
+			KKCRX_OnRoute(body) ||
+			KKCRX_OnRoute(owner) ||
+			KK_GarrisonHold.IsClearing(body) ||
+			KK_GarrisonHold.IsClearing(owner)
+		)
 			return vanilla.EOnTaskSimulate(owner, dt);
 
 		return super.EOnTaskSimulate(owner, dt);
@@ -1222,10 +1280,27 @@ modded class SCR_AIAvoidCharacterBehavior
 	}
 }
 
+modded class SCR_AIRetreatFromTargetBehavior
+{
+	override float CustomEvaluate()
+	{
+		// CRX calls the base retreat directly, so Koopky's zero never lands.
+		// Knowing the target is there, without a sight line, is enough for
+		// this to walk him back. A clear keeps the route.
+		if (KK_GarrisonHold.ClearerPushing(m_Utility))
+			return 0;
+
+		return super.CustomEvaluate();
+	}
+}
+
 modded class SCR_AIRetreatWhileLookAtBehavior
 {
 	override float CustomEvaluate()
 	{
+		if (KK_GarrisonHold.ClearerPushing(m_Utility))
+			return 0;
+
 		if (
 			m_Utility &&
 			(
@@ -1595,10 +1670,12 @@ modded class SCR_AIUpdateTargetAttackData
 		// The attack node has to run. It is what points the gun at the target
 		// and brings it up. CRX then drops the gun whenever the fire tree has
 		// no shot, which is the lower-and-raise while the room gun owns it.
-		// An attack jog keeps the rifle up the same way.
+		// An attack jog keeps the rifle up the same way. A clear does too,
+		// or the next raise cuts the step off and he shuffles.
 		if (
 			KK_GarrisonHold.CombatOwnsWeapon(body) ||
-			KK_GarrisonHold.AttackWeaponStaysUp(body)
+			KK_GarrisonHold.AttackWeaponStaysUp(body) ||
+			KK_GarrisonHold.ClearWeaponStaysUp(body)
 		)
 			return vanilla.ResolveFireTree(target, visible, weaponReady, fireRate);
 
@@ -1877,7 +1954,7 @@ modded class SCR_AICombatMoveState
 {
 	override void ApplyNewRequest(notnull SCR_AICombatMoveRequestBase request)
 	{
-		if (KK_GarrisonHold.IsSprintMoveLocked(this))
+		if (KK_GarrisonHold.IsSprintMoveLocked(this) || KK_GarrisonHold.IsClearMoveLocked(this))
 		{
 			request.m_eState = SCR_EAICombatMoveRequestState.CANCELED;
 			if (m_Request && m_Request.m_eState == SCR_EAICombatMoveRequestState.EXECUTING)
@@ -1893,7 +1970,13 @@ modded class SCR_AICombatMoveState
 
 	override void EnableAiming(bool enable)
 	{
-		if (enable && KK_GarrisonHold.IsSprintMoveLocked(this))
+		if (
+			enable &&
+			(
+				KK_GarrisonHold.IsSprintMoveLocked(this) ||
+				KK_GarrisonHold.IsClearMoveLocked(this)
+			)
+		)
 		{
 			m_bAimAtTarget = false;
 			return;
