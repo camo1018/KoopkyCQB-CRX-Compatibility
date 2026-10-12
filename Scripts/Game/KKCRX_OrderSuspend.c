@@ -575,6 +575,13 @@ modded class SCR_AICombatComponent
 	{
 		IEntity owner = GetOwner();
 
+		// Recognition stays. CRX's rates, which change how he fights, do not.
+		if (KKCRX_HouseOwns(owner))
+		{
+			KK_WriteHousePerception(perceptionComp, threatSystem);
+			return;
+		}
+
 		// Sprinting past a fight outside the building. Koopky wants no
 		// recognition for that stretch, and CRX would put its rates back.
 		if (owner && KK_GarrisonHold.IsIgnoringTargets(owner))
@@ -613,6 +620,21 @@ modded class SCR_AICombatComponent
 		out bool outRetreatTargetChanged,
 		out bool outCompartmentChanged)
 	{
+		// Aim and weapon choice stay with the house order. CRX writes both
+		// again after that pass.
+		if (KKCRX_HouseOwns(GetOwner()))
+		{
+			KK_EvaluateHouseOrder(
+				outWeaponEvent,
+				outSelectedTargetChanged,
+				outPrevTarget,
+				outCurrentTarget,
+				outRetreatTargetChanged,
+				outCompartmentChanged
+			);
+			return;
+		}
+
 		super.EvaluateWeaponAndTarget(
 			outWeaponEvent,
 			outSelectedTargetChanged,
@@ -691,14 +713,18 @@ modded class SCR_AIAttackBehavior
 		if (KKCRX_OnRoute(character) || KKCRX_OnRoute(agentEntity))
 			return 0;
 
-		// Within range of the building, the route stays selected. CRX's
-		// attack plants him, and the room gun fires without it. Farther
-		// out, this attack still scores.
+		// The whole clear, including the walk in. A player command is a
+		// high move, and CRX turns that into a strafe as soon as someone
+		// is in sight, which is before the room gun owns the shot.
 		if (
-			(KK_GarrisonHold.IsClearing(character) && KK_GarrisonHold.OwnsShot(character)) ||
-			(KK_GarrisonHold.IsClearing(agentEntity) && KK_GarrisonHold.OwnsShot(agentEntity))
+			KK_GarrisonHold.UseRoomCombat() &&
+			(
+				KK_GarrisonHold.OrderOwnsBehavior(character) ||
+				KK_GarrisonHold.OrderOwnsBehavior(agentEntity)
+			)
 		)
 		{
+			m_bUseCombatMove = false;
 			return 0;
 		}
 
@@ -814,19 +840,17 @@ modded class SCR_AIMoveIndividuallyBehavior
 				KK_GarrisonHold.IsRecalled(m_Utility.GetOwner());
 		}
 
-		// A clear inside the building keeps the route score. CRX drops a
-		// high move to 70 or 90 once he has a target, and that hands him
-		// to the attack. The attack plants him. The room gun still fires.
-		bool clearing =
-			KK_GarrisonHold.IsClearing(body) ||
-			(m_Utility && KK_GarrisonHold.IsClearing(m_Utility.GetOwner()));
-		if (
-			clearing &&
+		// The whole clear keeps the route score. CRX drops a high move,
+		// and a player command is one, to 70 or 90 once he has a target.
+		// That drop is the shuffle, and it starts before the room gun
+		// owns the shot.
+		bool onHouse =
+			KK_GarrisonHold.UseRoomCombat() &&
 			(
-				KK_GarrisonHold.OwnsShot(body) ||
-				(m_Utility && KK_GarrisonHold.OwnsShot(m_Utility.GetOwner()))
-			)
-		)
+				KK_GarrisonHold.OrderOwnsBehavior(body) ||
+				(m_Utility && KK_GarrisonHold.OrderOwnsBehavior(m_Utility.GetOwner()))
+			);
+		if (onHouse)
 		{
 			m_bUseCombatMove = false;
 			return vanilla.CustomEvaluate();
@@ -867,7 +891,17 @@ modded class SCR_AIMoveIndividuallyBehavior
 
 	override void OnActionSelected()
 	{
-		super.OnActionSelected();
+		// CRX's selection drops a high move into a combat step.
+		if (
+			m_Utility &&
+			(
+				KKCRX_HouseOwns(m_Utility.m_OwnerEntity) ||
+				KKCRX_HouseOwns(m_Utility.GetOwner())
+			)
+		)
+			vanilla.OnActionSelected();
+		else
+			super.OnActionSelected();
 
 		// CRX queues a lower a few hundred milliseconds after every move.
 		// A clear reissues that move along the route, so the lower keeps
@@ -906,7 +940,14 @@ modded class SCR_AIMoveInFormationBehavior
 {
 	override void OnActionSelected()
 	{
-		if (m_Utility && KKCRX_RifleStaysUp(m_Utility.m_OwnerEntity, m_Utility.GetOwner()))
+		if (
+			m_Utility &&
+			(
+				KKCRX_HouseOwns(m_Utility.m_OwnerEntity) ||
+				KKCRX_HouseOwns(m_Utility.GetOwner()) ||
+				KKCRX_RifleStaysUp(m_Utility.m_OwnerEntity, m_Utility.GetOwner())
+			)
+		)
 		{
 			vanilla.OnActionSelected();
 			return;
@@ -921,10 +962,10 @@ modded class SCR_AIMoveInFormationBehavior
 		if (m_Utility)
 			body = m_Utility.m_OwnerEntity;
 
-		bool clearing =
-			KK_GarrisonHold.IsClearing(body) ||
-			(m_Utility && KK_GarrisonHold.IsClearing(m_Utility.GetOwner()));
-		if (clearing)
+		bool onHouse =
+			KKCRX_HouseOwns(body) ||
+			(m_Utility && KKCRX_HouseOwns(m_Utility.GetOwner()));
+		if (onHouse)
 			return vanilla.CustomEvaluate();
 
 		return super.CustomEvaluate();
@@ -938,7 +979,14 @@ modded class SCR_AIIdleBehavior
 {
 	override void OnActionSelected()
 	{
-		if (m_Utility && KKCRX_RifleStaysUp(m_Utility.m_OwnerEntity, m_Utility.GetOwner()))
+		if (
+			m_Utility &&
+			(
+				KKCRX_HouseOwns(m_Utility.m_OwnerEntity) ||
+				KKCRX_HouseOwns(m_Utility.GetOwner()) ||
+				KKCRX_RifleStaysUp(m_Utility.m_OwnerEntity, m_Utility.GetOwner())
+			)
+		)
 		{
 			vanilla.OnActionSelected();
 			return;
@@ -966,6 +1014,15 @@ modded class SCR_AICombatMoveLogicBase
 		IEntity body;
 		if (owner)
 			body = owner.GetControlledEntity();
+
+		// The route owns the feet for the whole order, including outside.
+		if (KKCRX_HouseOwns(body) || KKCRX_HouseOwns(owner))
+		{
+			if (m_State && m_State.IsExecutingRequest())
+				m_State.CancelRequest();
+
+			return ENodeResult.RUNNING;
+		}
 
 		bool holdRoute =
 			KK_GarrisonHold.IsPinned(body) ||
@@ -1078,7 +1135,7 @@ modded class SCR_AIGetCombatMovementParameters
 
 		// CRX writes an aimed walk onto a move that still has a target.
 		// The bound has to stay the speed Koopky set.
-		if (KKCRX_OnRoute(body) || KKCRX_OnRoute(owner))
+		if (KKCRX_HouseOwns(body) || KKCRX_HouseOwns(owner) || KKCRX_OnRoute(body) || KKCRX_OnRoute(owner))
 			return vanilla.EOnTaskSimulate(owner, dt);
 
 		return super.EOnTaskSimulate(owner, dt);
@@ -1099,6 +1156,8 @@ modded class SCR_AIGetCombatMoveRequestParameters_Move
 		if (
 			KKCRX_OnRoute(body) ||
 			KKCRX_OnRoute(owner) ||
+			KKCRX_HouseOwns(body) ||
+			KKCRX_HouseOwns(owner) ||
 			KK_GarrisonHold.IsClearing(body) ||
 			KK_GarrisonHold.IsClearing(owner)
 		)
@@ -1112,7 +1171,7 @@ modded class SCR_AIDangerReaction_ProjectileHit
 {
 	override bool PerformReaction(notnull SCR_AIUtilityComponent utility, notnull SCR_AIThreatSystem threatSystem, AIDangerEvent dangerEvent, int dangerEventCount)
 	{
-		if (KKCRX_IsHoldingPost(utility.m_OwnerEntity) || KKCRX_IsReloadDash(utility.m_OwnerEntity) || KKCRX_IsTakeCoverLocked(utility.m_OwnerEntity) || KK_GarrisonHold.IsRecalled(utility.m_OwnerEntity))
+		if (KKCRX_HouseOwns(utility.m_OwnerEntity) || KKCRX_HouseOwns(utility.GetOwner()) || KKCRX_IsHoldingPost(utility.m_OwnerEntity) || KKCRX_IsReloadDash(utility.m_OwnerEntity) || KKCRX_IsTakeCoverLocked(utility.m_OwnerEntity) || KK_GarrisonHold.IsRecalled(utility.m_OwnerEntity))
 			return true;
 
 		return super.PerformReaction(utility, threatSystem, dangerEvent, dangerEventCount);
@@ -1123,7 +1182,7 @@ modded class SCR_AIDangerReaction_DamageTaken
 {
 	override bool PerformReaction(notnull SCR_AIUtilityComponent utility, notnull SCR_AIThreatSystem threatSystem, AIDangerEvent dangerEvent, int dangerEventCount)
 	{
-		if (KKCRX_IsHoldingPost(utility.m_OwnerEntity) || KKCRX_IsReloadDash(utility.m_OwnerEntity) || KKCRX_IsTakeCoverLocked(utility.m_OwnerEntity) || KK_GarrisonHold.IsRecalled(utility.m_OwnerEntity))
+		if (KKCRX_HouseOwns(utility.m_OwnerEntity) || KKCRX_HouseOwns(utility.GetOwner()) || KKCRX_IsHoldingPost(utility.m_OwnerEntity) || KKCRX_IsReloadDash(utility.m_OwnerEntity) || KKCRX_IsTakeCoverLocked(utility.m_OwnerEntity) || KK_GarrisonHold.IsRecalled(utility.m_OwnerEntity))
 			return true;
 
 		return super.PerformReaction(utility, threatSystem, dangerEvent, dangerEventCount);
@@ -1134,11 +1193,17 @@ modded class SCR_AIDangerReaction_Explosion
 {
 	override bool PerformReaction(notnull SCR_AIUtilityComponent utility, notnull SCR_AIThreatSystem threatSystem, AIDangerEvent dangerEvent, int dangerEventCount)
 	{
-		if (KKCRX_IsHoldingPost(utility.m_OwnerEntity) || KKCRX_IsReloadDash(utility.m_OwnerEntity) || KKCRX_IsTakeCoverLocked(utility.m_OwnerEntity) || KK_GarrisonHold.IsRecalled(utility.m_OwnerEntity))
+		if (KKCRX_HouseOwns(utility.m_OwnerEntity) || KKCRX_HouseOwns(utility.GetOwner()) || KKCRX_IsHoldingPost(utility.m_OwnerEntity) || KKCRX_IsReloadDash(utility.m_OwnerEntity) || KKCRX_IsTakeCoverLocked(utility.m_OwnerEntity) || KK_GarrisonHold.IsRecalled(utility.m_OwnerEntity))
 			return true;
 
 		return super.PerformReaction(utility, threatSystem, dangerEvent, dangerEventCount);
 	}
+}
+
+bool KKCRX_HouseOwns(IEntity soldier)
+{
+	return KK_GarrisonHold.UseRoomCombat() &&
+		KK_GarrisonHold.OrderOwnsBehavior(soldier);
 }
 
 bool KKCRX_IsHoldingPost(IEntity soldier)
@@ -1411,6 +1476,12 @@ modded class SCR_AIAvoidCharacterBehavior
 		if (!m_Utility)
 			return super.CustomEvaluate();
 
+		if (
+			KKCRX_HouseOwns(m_Utility.m_OwnerEntity) ||
+			KKCRX_HouseOwns(m_Utility.GetOwner())
+		)
+			return 0;
+
 		// CRX calls the base avoid directly, so a pin or a take cover push
 		// never reaches Koopky. Either one has to stay on the spot.
 		if (
@@ -1528,6 +1599,19 @@ modded class SCR_AIThreatSystem
 			m_Utility.m_CombatComponent.KK_ClearTarget();
 		}
 
+		// The threat value still moves. CRX's update also changes how he acts.
+		if (
+			m_Utility &&
+			(
+				KKCRX_HouseOwns(m_Utility.m_OwnerEntity) ||
+				KKCRX_HouseOwns(m_Utility.GetOwner())
+			)
+		)
+		{
+			vanilla.Update(utility, timeSlice);
+			return;
+		}
+
 		super.Update(utility, timeSlice);
 	}
 
@@ -1535,6 +1619,18 @@ modded class SCR_AIThreatSystem
 	{
 		if (KKCRX_SprintIgnoring())
 			return;
+
+		if (
+			m_Utility &&
+			(
+				KKCRX_HouseOwns(m_Utility.m_OwnerEntity) ||
+				KKCRX_HouseOwns(m_Utility.GetOwner())
+			)
+		)
+		{
+			vanilla.ThreatBulletImpact(count);
+			return;
+		}
 
 		super.ThreatBulletImpact(count);
 	}
@@ -1544,6 +1640,18 @@ modded class SCR_AIThreatSystem
 		if (KKCRX_SprintIgnoring())
 			return;
 
+		if (
+			m_Utility &&
+			(
+				KKCRX_HouseOwns(m_Utility.m_OwnerEntity) ||
+				KKCRX_HouseOwns(m_Utility.GetOwner())
+			)
+		)
+		{
+			vanilla.ThreatExplosion(distance);
+			return;
+		}
+
 		super.ThreatExplosion(distance);
 	}
 
@@ -1552,6 +1660,18 @@ modded class SCR_AIThreatSystem
 		if (KKCRX_SprintIgnoring())
 			return;
 
+		if (
+			m_Utility &&
+			(
+				KKCRX_HouseOwns(m_Utility.m_OwnerEntity) ||
+				KKCRX_HouseOwns(m_Utility.GetOwner())
+			)
+		)
+		{
+			vanilla.ThreatShotFired(distance, count);
+			return;
+		}
+
 		super.ThreatShotFired(distance, count);
 	}
 
@@ -1559,6 +1679,18 @@ modded class SCR_AIThreatSystem
 	{
 		if (KKCRX_SprintIgnoring())
 			return;
+
+		if (
+			m_Utility &&
+			(
+				KKCRX_HouseOwns(m_Utility.m_OwnerEntity) ||
+				KKCRX_HouseOwns(m_Utility.GetOwner())
+			)
+		)
+		{
+			vanilla.ThreatProjectileFlyby(count);
+			return;
+		}
 
 		super.ThreatProjectileFlyby(count);
 	}
@@ -1577,6 +1709,9 @@ modded class SCR_AIUtilityComponent
 {
 	override SCR_AIBehaviorBase EvaluateBehavior(BaseTarget unknownTarget)
 	{
+		if (KKCRX_HouseOwns(m_OwnerEntity) || KKCRX_HouseOwns(GetOwner()))
+			return KK_SelectHouseBehavior(unknownTarget);
+
 		bool ignore =
 			KK_GarrisonHold.IsIgnoringTargets(m_OwnerEntity) ||
 			KK_GarrisonHold.IsIgnoringTargets(GetOwner());
@@ -1655,7 +1790,12 @@ modded class SCR_AICharacterSetMovementSpeed
 		if (owner)
 			body = owner.GetControlledEntity();
 
-		ENodeResult result = super.EOnTaskSimulate(owner, dt);
+		// CRX writes the speed after the route has set it.
+		ENodeResult result;
+		if (KKCRX_HouseOwns(body) || KKCRX_HouseOwns(owner))
+			result = vanilla.EOnTaskSimulate(owner, dt);
+		else
+			result = super.EOnTaskSimulate(owner, dt);
 
 		// CRX writes the speed from the tree after the order. An aimed
 		// bound was coming out as a walk. Put the sprint back after the
@@ -1806,6 +1946,9 @@ modded class SCR_AISetWeaponRaised
 
 		KKCRX_ReleaseWeaponMode(clearer);
 
+		if (KKCRX_HouseOwns(body) || KKCRX_HouseOwns(owner))
+			return vanilla.EOnTaskSimulate(owner, dt);
+
 		return super.EOnTaskSimulate(owner, dt);
 	}
 }
@@ -1861,7 +2004,13 @@ modded class SCR_AIUpdateTargetAttackData
 		// An attack jog keeps the rifle up the same way. A clear does too,
 		// or the next raise cuts the step off and he shuffles.
 		// vanilla skips that drop. super is CRX, and the drop is in there.
-		if (KKCRX_RifleStaysUp(body, utilityBody) || KKCRX_RifleStaysUp(utilityOwner, null))
+		if (
+			KKCRX_HouseOwns(body) ||
+			KKCRX_HouseOwns(utilityBody) ||
+			KKCRX_HouseOwns(utilityOwner) ||
+			KKCRX_RifleStaysUp(body, utilityBody) ||
+			KKCRX_RifleStaysUp(utilityOwner, null)
+		)
 			return vanilla.ResolveFireTree(target, visible, weaponReady, fireRate);
 
 		return super.ResolveFireTree(target, visible, weaponReady, fireRate);
@@ -1872,6 +2021,14 @@ modded class SCR_AILookAction
 {
 	override void LookAt(vector pos, float priority, float duration = 0.8)
 	{
+		if (KKCRX_LookOnHouse())
+		{
+			if (KK_GarrisonHold.IsPathLookWrite())
+				vanilla.LookAt(pos, priority, duration);
+
+			return;
+		}
+
 		if (KKCRX_SprintIgnoring())
 			return;
 
@@ -1903,6 +2060,9 @@ modded class SCR_AILookAction
 
 	override void LookAt(IEntity ent, float priority, float duration = 0.8)
 	{
+		if (KKCRX_LookOnHouse())
+			return;
+
 		// Facing the enemy turns the sprint into a strafe. A look along
 		// the route still has to run, or the step never starts.
 		if (KKCRX_SprintIgnoring() || KKCRX_LookDashing())
@@ -1917,6 +2077,16 @@ modded class SCR_AILookAction
 
 		super.LookAt(ent, priority, duration);
 		KKCRX_RelockHold();
+	}
+
+	// The house order owns the head. A path snap writes the fields itself.
+	protected bool KKCRX_LookOnHouse()
+	{
+		if (!m_Utility)
+			return false;
+
+		return KKCRX_HouseOwns(m_Utility.m_OwnerEntity) ||
+			KKCRX_HouseOwns(m_Utility.GetOwner());
 	}
 
 	// Drops a look that is already on a man. The lane snap outranks him,
@@ -1937,6 +2107,12 @@ modded class SCR_AILookAction
 	// is what swings him off the lane and back.
 	override void Complete()
 	{
+		if (KKCRX_LookOnHouse())
+		{
+			vanilla.Complete();
+			return;
+		}
+
 		if (KKCRX_LookDashing() && m_fPriority >= SCR_AILookAction.PRIO_COMMANDER)
 			return;
 
@@ -1950,6 +2126,18 @@ modded class SCR_AILookAction
 		out bool outCancelLook,
 		out bool outRestartLook)
 	{
+		if (KKCRX_LookOnHouse())
+		{
+			vanilla.MoveLookParametersToNode(
+				outCanLook,
+				outLookPos,
+				outLookDuration,
+				outCancelLook,
+				outRestartLook
+			);
+			return;
+		}
+
 		// CRX's own look runs in this call and points him at the enemy.
 		// The next pass points him down the lane. That pair of writes is
 		// the head thrash. While he is sprinting, this node does not
