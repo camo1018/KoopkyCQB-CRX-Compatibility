@@ -800,7 +800,7 @@ modded class SCR_AIAttackBehavior
 		// A shot this addon owns uses Koopky's delay, not CRX's reaction wait.
 		if (utility && KK_GarrisonHold.OwnsShot(utility.m_OwnerEntity))
 		{
-			m_fWaitTime.m_Value = KK_GarrisonHold.ShotDelaySeconds();
+			m_fWaitTime.m_Value = KK_GarrisonHold.ShotDelayMs() / 1000;
 			return;
 		}
 
