@@ -1005,6 +1005,36 @@ modded class SCR_AIMedicHealBehavior
 
 		super.MedicHealBehaviorDelayed();
 	}
+
+	// CRX scores this after Koopky. The cluster gate has to be the last word.
+	override float CustomEvaluate()
+	{
+		float score = super.CustomEvaluate();
+		if (KK_GarrisonHold.ClearHealSuppressed(m_Utility))
+			return 0;
+
+		if (KK_GarrisonHold.ClearHealBoost(m_Utility))
+			return Math.Max(score, SCR_AIActionBase.PRIORITY_BEHAVIOR_HEAL_HIGH_PRIORITY);
+
+		return score;
+	}
+}
+
+// CRX raises a heal to attack priority while he is still in the cluster.
+// That raise lands after Koopky's gate, so the gate is applied again here.
+modded class SCR_AIHealBehavior
+{
+	override float CustomEvaluate()
+	{
+		float score = super.CustomEvaluate();
+		if (KK_GarrisonHold.ClearHealSuppressed(m_Utility))
+			return 0;
+
+		if (KK_GarrisonHold.ClearHealBoost(m_Utility))
+			return Math.Max(score, SCR_AIActionBase.PRIORITY_BEHAVIOR_HEAL_HIGH_PRIORITY);
+
+		return score;
+	}
 }
 
 modded class SCR_AICombatMoveLogicBase
