@@ -828,6 +828,15 @@ modded class SCR_AIMoveIndividuallyBehavior
 		if (m_Utility)
 			body = m_Utility.m_OwnerEntity;
 
+		if (
+			KK_GarrisonHold.HealingNow(body) ||
+			(m_Utility && KK_GarrisonHold.HealingNow(m_Utility.GetOwner()))
+		)
+		{
+			KK_GarrisonHold.HoldForHeal(body);
+			return 0;
+		}
+
 		bool routeLocked =
 			KKCRX_IsTakeCoverLocked(body) ||
 			KK_GarrisonHold.IsBoundSprint(body) ||
@@ -1044,6 +1053,18 @@ modded class SCR_AICombatMoveLogicBase
 		IEntity body;
 		if (owner)
 			body = owner.GetControlledEntity();
+
+		if (KK_GarrisonHold.HealingNow(body) || KK_GarrisonHold.HealingNow(owner))
+		{
+			if (m_State && m_State.IsExecutingRequest())
+				m_State.CancelRequest();
+
+			IEntity healer = body;
+			if (!healer)
+				healer = owner;
+			KK_GarrisonHold.HoldForHeal(healer);
+			return ENodeResult.RUNNING;
+		}
 
 		// The route owns the feet for the whole order, including outside.
 		if (KKCRX_HouseOwns(body) || KKCRX_HouseOwns(owner))
