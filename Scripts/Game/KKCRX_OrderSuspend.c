@@ -1250,6 +1250,9 @@ bool KKCRX_RifleStaysUp(IEntity soldier, IEntity other)
 
 bool KKCRX_OneRifleStaysUp(IEntity soldier)
 {
+	if (KK_GarrisonHold.YieldsWeaponForHeal(soldier))
+		return false;
+
 	return KK_GarrisonHold.ClearWeaponStaysUp(soldier) ||
 		KK_GarrisonHold.AttackWeaponStaysUp(soldier) ||
 		KK_GarrisonHold.CombatOwnsWeapon(soldier);
@@ -1857,9 +1860,17 @@ modded class SCR_AICharacterSetMovementSpeed
 				if (!soldier)
 					soldier = owner;
 
-				KK_GarrisonHold.KeepClearWeaponRaised(soldier);
-				if (KKCRX_RifleStaysUp(soldier, owner))
-					KKCRX_HoldWeaponMode(soldier);
+				if (KK_GarrisonHold.YieldsWeaponForHeal(soldier))
+				{
+					KKCRX_ReleaseWeaponMode(soldier);
+					KK_GarrisonHold.LeaveWeaponForHeal(soldier);
+				}
+				else
+				{
+					KK_GarrisonHold.KeepClearWeaponRaised(soldier);
+					if (KKCRX_RifleStaysUp(soldier, owner))
+						KKCRX_HoldWeaponMode(soldier);
+				}
 			}
 		}
 
@@ -1874,6 +1885,18 @@ modded class SCR_AISetWeaponRaised
 		IEntity body;
 		if (owner)
 			body = owner.GetControlledEntity();
+
+		if (KK_GarrisonHold.YieldsWeaponForHeal(body) || KK_GarrisonHold.YieldsWeaponForHeal(owner))
+		{
+			KKCRX_ReleaseWeaponMode(body);
+			KKCRX_ReleaseWeaponMode(owner);
+
+			IEntity healer = body;
+			if (!healer)
+				healer = owner;
+			KK_GarrisonHold.LeaveWeaponForHeal(healer);
+			return ENodeResult.SUCCESS;
+		}
 
 		if (KK_GarrisonHold.IsIgnoringTargets(body) || KK_GarrisonHold.IsIgnoringTargets(owner))
 		{
