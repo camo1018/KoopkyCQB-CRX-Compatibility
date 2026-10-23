@@ -770,6 +770,9 @@ modded class SCR_AIAttackBehavior
 		bool pinned =
 			KK_GarrisonHold.IsPinned(character) ||
 			KK_GarrisonHold.IsPinned(agentEntity);
+		bool engageStop =
+			KK_GarrisonHold.IsEngageStopped(character) ||
+			KK_GarrisonHold.IsEngageStopped(agentEntity);
 		bool doorFiring =
 			KK_GarrisonHold.IsDoorFiring(character) ||
 			KK_GarrisonHold.IsDoorFiring(agentEntity);
@@ -779,7 +782,7 @@ modded class SCR_AIAttackBehavior
 			KK_GarrisonHold.GetApproachGoal(character, approachGoal) ||
 			KK_GarrisonHold.GetApproachGoal(agentEntity, approachGoal);
 
-		if (clearingInside || pinned || doorFiring)
+		if (clearingInside || pinned || engageStop || doorFiring)
 		{
 			m_bUseCombatMove = false;
 			if (KK_GarrisonHold.IsPinned(character))
@@ -1078,6 +1081,8 @@ modded class SCR_AICombatMoveLogicBase
 		bool holdRoute =
 			KK_GarrisonHold.IsPinned(body) ||
 			KK_GarrisonHold.IsPinned(owner) ||
+			KK_GarrisonHold.IsEngageStopped(body) ||
+			KK_GarrisonHold.IsEngageStopped(owner) ||
 			KKCRX_IsTakeCoverLocked(body) ||
 			KKCRX_IsTakeCoverLocked(owner) ||
 			KK_GarrisonHold.IsBoundSprint(body) ||
@@ -1096,6 +1101,7 @@ modded class SCR_AICombatMoveLogicBase
 
 			KKCRX_KeepBoundSprint(soldier);
 			KKCRX_HoldPinned(soldier);
+			KKCRX_HoldEngageStop(soldier);
 			KKCRX_KeepRecall(soldier);
 			return ENodeResult.RUNNING;
 		}
@@ -1466,6 +1472,47 @@ void KKCRX_HoldPinned(IEntity soldier)
 
 	if (!utility || !utility.m_CombatMoveState)
 		return;
+
+	utility.m_CombatMoveState.m_bAimAtTarget = false;
+}
+
+// Attack engage stops him with a speed cap. CRX still aims the move that
+// was just cancelled, and that aim turns the stop into a sidestep. The
+// attack step stays queued. Only the strafe is dropped.
+void KKCRX_HoldEngageStop(IEntity soldier)
+{
+	if (!KK_GarrisonHold.IsEngageStopped(soldier) || KK_GarrisonHold.IsBoundSprint(soldier))
+		return;
+
+	IEntity body = soldier;
+	AIAgent agent = AIAgent.Cast(soldier);
+	if (agent)
+		body = agent.GetControlledEntity();
+
+	if (!body)
+		body = soldier;
+
+	CharacterControllerComponent controller = CharacterControllerComponent.Cast(
+		body.FindComponent(CharacterControllerComponent)
+	);
+	if (controller)
+		controller.OverrideMaxSpeed(0);
+
+	SCR_AIUtilityComponent utility = SCR_AIUtilityComponent.Cast(
+		body.FindComponent(SCR_AIUtilityComponent)
+	);
+	if (!utility && agent)
+	{
+		utility = SCR_AIUtilityComponent.Cast(
+			agent.FindComponent(SCR_AIUtilityComponent)
+		);
+	}
+
+	if (!utility || !utility.m_CombatMoveState)
+		return;
+
+	if (utility.m_CombatMoveState.IsExecutingRequest())
+		utility.m_CombatMoveState.CancelRequest();
 
 	utility.m_CombatMoveState.m_bAimAtTarget = false;
 }
@@ -1858,11 +1905,17 @@ modded class SCR_AICharacterSetMovementSpeed
 		if (KK_GarrisonHold.IsBoundSprint(body) || KK_GarrisonHold.IsBoundSprint(owner))
 			KKCRX_KeepBoundSprint(body);
 		else if (KK_GarrisonHold.IsRecalled(body) || KK_GarrisonHold.IsRecalled(owner))
+		{
 			KKCRX_KeepRecall(body);
+			KKCRX_HoldEngageStop(body);
+			KKCRX_HoldEngageStop(owner);
+		}
 		else
 		{
 			KKCRX_HoldPinned(body);
 			KKCRX_HoldPinned(owner);
+			KKCRX_HoldEngageStop(body);
+			KKCRX_HoldEngageStop(owner);
 
 			if (
 				KK_GarrisonHold.IsMoveFire(body) ||
@@ -2106,6 +2159,11 @@ modded class SCR_AILookAction
 		if (KKCRX_SprintIgnoring())
 			return;
 
+		// Attack engage already wrote its point. CRX would replace it
+		// with its own enemy look and drop the skill offset.
+		if (KKCRX_EngageLookHeld())
+			return;
+
 		// The lane look is already on him. A look at the enemy, applied
 		// and then replaced, is the turn off the sprint and back.
 		if (KKCRX_LookDashing())
@@ -2140,6 +2198,9 @@ modded class SCR_AILookAction
 		// Facing the enemy turns the sprint into a strafe. A look along
 		// the route still has to run, or the step never starts.
 		if (KKCRX_SprintIgnoring() || KKCRX_LookDashing())
+			return;
+
+		if (KKCRX_EngageLookHeld())
 			return;
 
 		if (KKCRX_LookOnRoute())
@@ -2190,6 +2251,10 @@ modded class SCR_AILookAction
 		if (KKCRX_LookDashing() && m_fPriority >= SCR_AILookAction.PRIO_COMMANDER)
 			return;
 
+		// Finishing this look is what lets CRX aim the head at its own point.
+		if (KKCRX_EngageLookHeld())
+			return;
+
 		super.Complete();
 	}
 
@@ -2201,6 +2266,20 @@ modded class SCR_AILookAction
 		out bool outRestartLook)
 	{
 		if (KKCRX_LookOnHouse())
+		{
+			vanilla.MoveLookParametersToNode(
+				outCanLook,
+				outLookPos,
+				outLookDuration,
+				outCancelLook,
+				outRestartLook
+			);
+			return;
+		}
+
+		// Attack engage already wrote its point, skill offset included.
+		// CRX would replace it with its own enemy look.
+		if (KKCRX_EngageLookHeld())
 		{
 			vanilla.MoveLookParametersToNode(
 				outCanLook,
@@ -2302,6 +2381,16 @@ modded class SCR_AILookAction
 
 		return KKCRX_OnRoute(m_Utility.m_OwnerEntity) ||
 			KKCRX_OnRoute(m_Utility.GetOwner());
+	}
+
+	// Attack engage is aiming. A sprint keeps the lane instead.
+	protected bool KKCRX_EngageLookHeld()
+	{
+		if (!m_Utility || KKCRX_LookDashing() || KKCRX_SprintIgnoring())
+			return false;
+
+		return KK_GarrisonHold.PerceivedFireActive(m_Utility.m_OwnerEntity) ||
+			KK_GarrisonHold.PerceivedFireActive(m_Utility.GetOwner());
 	}
 
 	protected bool KKCRX_LookDashing()
