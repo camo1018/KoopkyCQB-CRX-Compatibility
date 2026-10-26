@@ -2194,6 +2194,17 @@ modded class SCR_AILookAction
 		if (KKCRX_LookDashing())
 			return;
 
+		// Between plants the advance step owns the head. An enemy look
+		// here is turned back by that step on the next pass.
+		if (KKCRX_StepOwnsLook())
+		{
+			if (priority >= 50)
+				return;
+
+			vanilla.LookAt(pos, priority, duration);
+			return;
+		}
+
 		// An enemy look is 80, and an unidentified man is 50. Either one
 		// turns the bound into a walk. The look along the route is lower,
 		// and the step does not start without it.
@@ -2225,7 +2236,7 @@ modded class SCR_AILookAction
 		if (KKCRX_SprintIgnoring() || KKCRX_LookDashing())
 			return;
 
-		if (KKCRX_EngageLookHeld())
+		if (KKCRX_EngageLookHeld() || KKCRX_StepOwnsLook())
 			return;
 
 		if (KKCRX_LookOnRoute())
@@ -2277,7 +2288,7 @@ modded class SCR_AILookAction
 			return;
 
 		// Finishing this look is what lets CRX aim the head at its own point.
-		if (KKCRX_EngageLookHeld())
+		if (KKCRX_EngageLookHeld() || KKCRX_StepOwnsLook())
 			return;
 
 		super.Complete();
@@ -2367,6 +2378,21 @@ modded class SCR_AILookAction
 			return;
 		}
 
+		// The step already wrote its point. CRX's look in this call is
+		// the enemy, and the next pass puts the step back.
+		if (KKCRX_StepOwnsLook())
+		{
+			m_bKKLaneHeld = false;
+			vanilla.MoveLookParametersToNode(
+				outCanLook,
+				outLookPos,
+				outLookDuration,
+				outCancelLook,
+				outRestartLook
+			);
+			return;
+		}
+
 		m_bKKLaneHeld = false;
 		super.MoveLookParametersToNode(
 			outCanLook,
@@ -2420,6 +2446,18 @@ modded class SCR_AILookAction
 		if (KKCRX_EngageLookHeld())
 			return;
 
+		// The plant look has to come off so the step can take the head.
+		// A step look that is already on him stays. Cancelling it is what
+		// lets CRX aim at the man for one pass.
+		if (KKCRX_StepOwnsLook())
+		{
+			if (m_fPriority < 50 && m_vPosition != vector.Zero)
+				return;
+
+			vanilla.Cancel();
+			return;
+		}
+
 		super.Cancel();
 	}
 
@@ -2472,6 +2510,20 @@ modded class SCR_AILookAction
 
 		return KK_GarrisonHold.PerceivedFireActive(m_Utility.m_OwnerEntity) ||
 			KK_GarrisonHold.PerceivedFireActive(m_Utility.GetOwner());
+	}
+
+	// Advance between plants. The plant and a live shot keep the engage
+	// point. A bound sprint keeps the lane in the dash path.
+	protected bool KKCRX_StepOwnsLook()
+	{
+		if (!m_Utility || KKCRX_LookDashing() || KKCRX_SprintIgnoring())
+			return false;
+
+		if (KKCRX_EngageLookHeld())
+			return false;
+
+		return KK_GarrisonHold.AttackEngageOwnsLook(m_Utility.m_OwnerEntity) ||
+			KK_GarrisonHold.AttackEngageOwnsLook(m_Utility.GetOwner());
 	}
 
 	protected bool KKCRX_LookDashing()
