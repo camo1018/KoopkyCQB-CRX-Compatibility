@@ -730,7 +730,12 @@ modded class SCR_AIAttackBehavior
 
 		// The bound is still his move. CRX's attack looks at the enemy and
 		// that look walks the sprint. A man held on the spot can still shoot.
-		if (KKCRX_OnRoute(character) || KKCRX_OnRoute(agentEntity))
+		if (
+			KKCRX_OnRoute(character) ||
+			KKCRX_OnRoute(agentEntity) ||
+			KK_GarrisonHold.IsCoverApproach(character) ||
+			KK_GarrisonHold.IsCoverApproach(agentEntity)
+		)
 			return 0;
 
 		// The whole clear, including the walk in. A player command is a
@@ -863,13 +868,15 @@ modded class SCR_AIMoveIndividuallyBehavior
 		bool routeLocked =
 			KKCRX_IsTakeCoverLocked(body) ||
 			KK_GarrisonHold.IsBoundSprint(body) ||
-			KK_GarrisonHold.IsRecalled(body);
+			KK_GarrisonHold.IsRecalled(body) ||
+			KK_GarrisonHold.IsCoverApproach(body);
 		if (m_Utility)
 		{
 			routeLocked = routeLocked ||
 				KKCRX_IsTakeCoverLocked(m_Utility.GetOwner()) ||
 				KK_GarrisonHold.IsBoundSprint(m_Utility.GetOwner()) ||
-				KK_GarrisonHold.IsRecalled(m_Utility.GetOwner());
+				KK_GarrisonHold.IsRecalled(m_Utility.GetOwner()) ||
+				KK_GarrisonHold.IsCoverApproach(m_Utility.GetOwner());
 		}
 
 		// The whole clear keeps the route score. CRX drops a high move,
@@ -901,7 +908,9 @@ modded class SCR_AIMoveIndividuallyBehavior
 			// behavior is the strafe toward the enemy.
 			if (
 				KK_GarrisonHold.IsBoundSprint(soldier) ||
-				(m_Utility && KK_GarrisonHold.IsBoundSprint(m_Utility.GetOwner()))
+				(m_Utility && KK_GarrisonHold.IsBoundSprint(m_Utility.GetOwner())) ||
+				KK_GarrisonHold.IsCoverApproach(soldier) ||
+				(m_Utility && KK_GarrisonHold.IsCoverApproach(m_Utility.GetOwner()))
 			)
 				m_bUseCombatMove = false;
 
@@ -1103,6 +1112,8 @@ modded class SCR_AICombatMoveLogicBase
 			KK_GarrisonHold.IsPinned(owner) ||
 			KK_GarrisonHold.IsEngageStopped(body) ||
 			KK_GarrisonHold.IsEngageStopped(owner) ||
+			KK_GarrisonHold.IsCoverApproach(body) ||
+			KK_GarrisonHold.IsCoverApproach(owner) ||
 			KKCRX_IsTakeCoverLocked(body) ||
 			KKCRX_IsTakeCoverLocked(owner) ||
 			KK_GarrisonHold.IsBoundSprint(body) ||
@@ -1623,6 +1634,8 @@ modded class SCR_AIAvoidCharacterBehavior
 				KK_GarrisonHold.IsReloadBashing(m_Utility.GetOwner()) ||
 				KKCRX_IsTakeCoverLocked(m_Utility.m_OwnerEntity) ||
 				KKCRX_IsTakeCoverLocked(m_Utility.GetOwner()) ||
+				KK_GarrisonHold.IsCoverApproach(m_Utility.m_OwnerEntity) ||
+				KK_GarrisonHold.IsCoverApproach(m_Utility.GetOwner()) ||
 				KK_GarrisonHold.IsRecalled(m_Utility.m_OwnerEntity) ||
 				KK_GarrisonHold.IsRecalled(m_Utility.GetOwner())
 			)
@@ -1669,6 +1682,8 @@ modded class SCR_AIRetreatWhileLookAtBehavior
 				KK_GarrisonHold.IsReloadBashing(m_Utility.GetOwner()) ||
 				KKCRX_IsTakeCoverLocked(m_Utility.m_OwnerEntity) ||
 				KKCRX_IsTakeCoverLocked(m_Utility.GetOwner()) ||
+				KK_GarrisonHold.IsCoverApproach(m_Utility.m_OwnerEntity) ||
+				KK_GarrisonHold.IsCoverApproach(m_Utility.GetOwner()) ||
 				KK_GarrisonHold.IsRecalled(m_Utility.m_OwnerEntity) ||
 				KK_GarrisonHold.IsRecalled(m_Utility.GetOwner())
 			)
